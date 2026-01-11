@@ -42,7 +42,8 @@ def load_scores():
         raise FileNotFoundError("No data found. Expected data/processed/town_scores.json or data/raw/town_scores.(xlsx|csv)")
 
     # Normalize the two required fields
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = df.columns.map(lambda c: str(c).strip())
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)]
     if "Zip" not in df.columns:
         raise ValueError(f"Missing 'Zip' column. Found: {list(df.columns)}")
     if "Overall Score" not in df.columns:

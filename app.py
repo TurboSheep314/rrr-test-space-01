@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 import os
 import urllib.request
 import zipfile
@@ -12,19 +10,20 @@ from src.variance_analysis import compute_relative_variance_cv
 from src.composite_score import compute_composite_score
 from src.heatmap import create_zip_heatmap
 
-
-
 st.set_page_config(layout="wide")
 st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
 
 SHEET_ID = "138F3qdX_VAHuC6eI6z_AfFqTj3xtJMFk"
+GID = 1097485755  # tab gid from your URL
 
-DATA_JSON = "data/processed/town_scores.json"
-ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
 
+# ----------------------------
+# Shapes loader (single definition)
+# ----------------------------
 @st.cache_resource
 def load_shapes():
-    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA5/tl_2024_us_zcta520.zip"
+    # IMPORTANT: ZCTA520 (not ZCTA5)
+    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
     extract_dir = "data/zcta_cache"
     shp_path = os.path.join(extract_dir, "tl_2024_us_zcta520.shp")
 
@@ -33,90 +32,30 @@ def load_shapes():
         zip_path = os.path.join(extract_dir, "tl_2024_us_zcta520.zip")
 
         urllib.request.urlretrieve(url, zip_path)
-
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall(extract_dir)
 
     return load_zip_shapes(shp_path)
 
+
+# ----------------------------
+# Scores loader (Google Sheets)
+# ----------------------------
 @st.cache_data
-# def load_scores(json_path: str) -> pd.DataFrame:
-#     with open(json_path) as f:
-#         records = json.load(f)
-#     df = pd.DataFrame(records)
-#     # Ensure Zip is 5-digit string
-#     df["Zip"] = df["Zip"].astype(str).str.zfill(5)
-def read_table_with_best_header(path: str) -> pd.DataFrame:
-    # Try a few header rows and choose the one that produces sensible column names
-    candidates = []
-    if path.endswith(".xlsx"):
-        for h in [0, 1, 2, 3, 4, 5]:
-            try:
-                tmp = pd.read_excel(path, header=h)
-                candidates.append((h, tmp))
-            except Exception:
-                pass
-    else:
-        for h in [0, 1, 2, 3, 4, 5]:
-            try:
-                tmp = pd.read_csv(path, header=h)
-                candidates.append((h, tmp))
-            except Exception:
-                pass
-
-    def score_cols(cols):
-        cols = [str(c).strip().lower() for c in cols]
-        score = 0
-        for c in cols:
-            if "zip" in c or "zcta" in c or "postal" in c:
-                score += 5
-            if "overall" in c and "score" in c:
-                score += 5
-            if c == "town":
-                score += 3
-        return score
-
-    if not candidates:
-        raise ValueError("Could not read file with any tested header rows (0-5).")
-
-    best_h, best_df = max(candidates, key=lambda t: score_cols(t[1].columns))
-    st.write("DEBUG: selected header row =", best_h)
-    st.write("DEBUG: columns =", list(best_df.columns))
-    return best_df
-#     return df
-def load_scores(sheet_id: str, gid: int = 0):
-    """
-    Load town scores from a public Google Sheet (CSV export),
-    normalize headers, auto-detect Zip and Overall Score columns,
-    and return a clean DataFrame.
-    """
-    # ----------------------------------------
-    # 1) Load from Google Sheets
-    # ----------------------------------------
+def load_scores(sheet_id: str, gid: int = 0) -> pd.DataFrame:
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-    #df = pd.read_csv(url)
-    #debigging google sheets url 
-   
 
-    try:
-        with urllib.request.urlopen(url) as resp:
-            st.write("DEBUG sheets status:", resp.status)
-    except Exception as e:
-        st.error(f"Google Sheets export failed: {type(e).__name__}: {e}")
-        st.write("DEBUG url:", url)
-        raise
+    # Quick connectivity check (optional)
+    with urllib.request.urlopen(url) as resp:
+        st.write("DEBUG sheets status:", resp.status)
 
-    df = pd.read_csv(url)
+    # CRITICAL: dtype=str preserves leading zeros in ZIPs
+    df = pd.read_csv(url, dtype=str)
 
-    # ----------------------------------------
-    # 2) Clean column headers
-    # ----------------------------------------
+    # Clean headers
     df.columns = df.columns.map(lambda c: str(c).strip())
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)]
 
-    # ----------------------------------------
-    # 3) Auto-detect Zip + Overall Score columns
-    # ----------------------------------------
     def canon(s: str) -> str:
         s = str(s).strip().lower()
         for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
@@ -130,7 +69,9 @@ def load_scores(sheet_id: str, gid: int = 0):
         cc = canon(c)
 
         if zip_col is None and (
-            "zip" in cc
+            cc == "zip"
+            or "zip code" in cc
+            or "zipcode" in cc
             or "postal" in cc
             or "zcta" in cc
             or cc in ["geoid", "geoid20"]
@@ -149,44 +90,27 @@ def load_scores(sheet_id: str, gid: int = 0):
     if overall_col is None:
         raise ValueError(f"Missing Overall Score column. Found: {list(df.columns)}")
 
-    # ----------------------------------------
-    # 4) Normalize + return
-    # ----------------------------------------
     df = df.rename(columns={zip_col: "Zip", overall_col: "Overall Score"})
 
+    # Bulletproof ZIP normalization
     df["Zip"] = (
-        df["Zip"]
-        .astype(str)
-        .str.extract(r"(\d{5})", expand=False)
+        df["Zip"].astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"[^0-9]", "", regex=True)
         .str.zfill(5)
+        .str[-5:]
     )
+    df = df[df["Zip"].str.match(r"^\d{5}$", na=False)]
 
     return df
 
-def load_shapes():
-    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
-    #url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
-    extract_dir = "data/zcta_cache"
-    shp_path = os.path.join(extract_dir, "tl_2024_us_zcta520.shp")
 
-    if not os.path.exists(shp_path):
-        os.makedirs(extract_dir, exist_ok=True)
-        zip_path = os.path.join(extract_dir, "tl_2024_us_zcta520.zip")
-
-        urllib.request.urlretrieve(url, zip_path)
-
-        with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(extract_dir)
-
-    return load_zip_shapes(shp_path)
-
-# df = load_scores(DATA_JSON)
-df = load_scores(SHEET_ID, gid = 1097485755)
-try:
-    zip_gdf = load_shapes()
-except Exception as e:
-    st.error(f"load_shapes failed: {type(e).__name__}: {e}")
-    raise
+# ----------------------------
+# Load data + shapes
+# ----------------------------
+df = load_scores(SHEET_ID, gid=GID)
+zip_gdf = load_shapes()
 
 # Optional speed filter (recommended for first run)
 st.sidebar.header("Map Scope")
@@ -212,32 +136,28 @@ df["Composite Score"] = compute_composite_score(df, columns, weights)
 # Merge shapes with scores
 merged = zip_gdf.merge(df, on="Zip", how="inner")
 
-
+# Debug + stop if empty
 if merged.empty:
     st.error("No ZIP geometries matched your score data (merged is empty).")
-
-    # Show samples to diagnose ZIP formatting mismatch
-    if "Zip" in df.columns:
-        st.write("Sample ZIPs in data:", df["Zip"].dropna().astype(str).str.zfill(5).head(20).tolist())
-    else:
-        st.write("DataFrame missing 'Zip' column after load/normalize.")
-
-    st.write("Sample ZIPs in shapes:", zip_gdf["Zip"].dropna().astype(str).head(20).tolist())
-
-    # show counts
-    st.write("Unique ZIPs in data:", int(df["Zip"].nunique()) if "Zip" in df.columns else "n/a")
+    st.write("Sample ZIPs in data:", df["Zip"].head(20).tolist())
+    st.write("Sample ZIPs in shapes:", zip_gdf["Zip"].head(20).tolist())
+    st.write("Unique ZIPs in data:", int(df["Zip"].nunique()))
     st.write("Unique ZIPs in shapes:", int(zip_gdf["Zip"].nunique()))
-
     st.stop()
 
-# Display info + map
 st.write("Using top-2 CV columns:", top2)
 st.write("Merged ZIPs:", len(merged))
 
-# Rough center: use merged centroid average (keeps it general)
+# Safe center using bounds
 minx, miny, maxx, maxy = merged.total_bounds
 center_lat = (miny + maxy) / 2
 center_lon = (minx + maxx) / 2
 
-m = create_zip_heatmap(merged, "Composite Score", center=(center_lat, center_lon), zoom=9 if scope.endswith("(fast)") else 4)
+m = create_zip_heatmap(
+    merged,
+    "Composite Score",
+    center=(center_lat, center_lon),
+    zoom=9 if scope.endswith("(fast)") else 4,
+)
+
 st.components.v1.html(m._repr_html_(), height=720)

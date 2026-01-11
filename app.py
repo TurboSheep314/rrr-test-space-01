@@ -23,6 +23,43 @@ ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
 #     df = pd.DataFrame(records)
 #     # Ensure Zip is 5-digit string
 #     df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+def read_table_with_best_header(path: str) -> pd.DataFrame:
+    # Try a few header rows and choose the one that produces sensible column names
+    candidates = []
+    if path.endswith(".xlsx"):
+        for h in [0, 1, 2, 3, 4, 5]:
+            try:
+                tmp = pd.read_excel(path, header=h)
+                candidates.append((h, tmp))
+            except Exception:
+                pass
+    else:
+        for h in [0, 1, 2, 3, 4, 5]:
+            try:
+                tmp = pd.read_csv(path, header=h)
+                candidates.append((h, tmp))
+            except Exception:
+                pass
+
+    def score_cols(cols):
+        cols = [str(c).strip().lower() for c in cols]
+        score = 0
+        for c in cols:
+            if "zip" in c or "zcta" in c or "postal" in c:
+                score += 5
+            if "overall" in c and "score" in c:
+                score += 5
+            if c == "town":
+                score += 3
+        return score
+
+    if not candidates:
+        raise ValueError("Could not read file with any tested header rows (0-5).")
+
+    best_h, best_df = max(candidates, key=lambda t: score_cols(t[1].columns))
+    st.write("DEBUG: selected header row =", best_h)
+    st.write("DEBUG: columns =", list(best_df.columns))
+    return best_df
 #     return df
 def load_scores():
     # ----------------------------------------
@@ -39,9 +76,9 @@ def load_scores():
     # 2) Cloud fallback: load raw data
     # ----------------------------------------
     if os.path.exists("data/raw/town_scores.xlsx"):
-        df = pd.read_excel("data/raw/town_scores.xlsx", header=1)
+        df = read_table_with_best_header("data/raw/town_scores.xlsx")
     elif os.path.exists("data/raw/town_scores.csv"):
-        df = pd.read_csv("data/raw/town_scores.csv", header=1)
+        df = read_table_with_best_header("data/raw/town_scores.csv")
     else:
         raise FileNotFoundError(
             "No data found. Expected data/processed/town_scores.json "

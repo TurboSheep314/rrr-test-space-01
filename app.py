@@ -94,6 +94,18 @@ def load_scores(sheet_id: str, gid: int = 0):
     # 1) Load from Google Sheets
     # ----------------------------------------
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    #df = pd.read_csv(url)
+    #debigging google sheets url 
+   
+
+    try:
+        with urllib.request.urlopen(url) as resp:
+            st.write("DEBUG sheets status:", resp.status)
+    except Exception as e:
+        st.error(f"Google Sheets export failed: {type(e).__name__}: {e}")
+        st.write("DEBUG url:", url)
+        raise
+
     df = pd.read_csv(url)
 
     # ----------------------------------------
@@ -169,7 +181,7 @@ def load_shapes():
     return load_zip_shapes(shp_path)
 
 # df = load_scores(DATA_JSON)
-df = load_scores(SHEET_ID)
+df = load_scores(SHEET_ID, gid = 1097485755)
 try:
     zip_gdf = load_shapes()
 except Exception as e:

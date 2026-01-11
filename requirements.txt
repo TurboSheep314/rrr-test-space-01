@@ -1,0 +1,8 @@
+pandas
+numpy
+geopandas
+folium
+streamlit
+scikit-learn
+shapely
+openpyxl

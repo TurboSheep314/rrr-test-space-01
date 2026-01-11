@@ -44,12 +44,40 @@ def load_scores():
     # Normalize the two required fields
     df.columns = df.columns.map(lambda c: str(c).strip())
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)]
-    if "Zip" not in df.columns:
-        raise ValueError(f"Missing 'Zip' column. Found: {list(df.columns)}")
-    if "Overall Score" not in df.columns:
-        raise ValueError(f"Missing 'Overall Score' column. Found: {list(df.columns)}")
+    
+    def canon(s: str) -> str:
+    s = str(s).strip().lower()
+    for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
+        s = s.replace(ch, " ")
+    s = " ".join(s.split())
+    return s
 
-    df["Zip"] = df["Zip"].astype(str).str.extract(r"(\d{5})", expand=False).str.zfill(5)
+    canon_map = {canon(c): c for c in df.columns}
+
+    zip_candidates = [
+        "zip", "zipcode", "zip code", "zcta", "zcta5", "zcta5ce", "zcta5ce20", "zcta5ce10"
+    ]
+    overall_candidates = [
+        "overall score", "overall", "score", "total score"
+    ]
+
+    zip_col = next((canon_map[k] for k in zip_candidates if k in canon_map), None)
+    overall_col = next((canon_map[k] for k in overall_candidates if k in canon_map), None)
+
+    if zip_col is None:
+        raise ValueError(f"Missing ZIP column. Found: {list(df.columns)}")
+    if overall_col is None:
+        raise ValueError(f"Missing Overall Score column. Found: {list(df.columns)}")
+
+    df = df.rename(columns={zip_col: "Zip", overall_col: "Overall Score"})
+
+    df["Zip"] = (
+        df["Zip"]
+        .astype(str)
+        .str.extract(r"(\d{5})", expand=False)
+        .str.zfill(5)
+    )
+
     return df
 
 @st.cache_data

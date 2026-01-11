@@ -6,7 +6,7 @@ import geopandas as gpd
 #     gdf["Zip"] = gdf[zip_col].astype(str).str.zfill(5)
 #     return gdf[["Zip", "geometry"]]
 
-
+#gdf["Zip"] = gdf["ZCTA5CE20"].astype(str).str.zfill(5)
 def load_zip_shapes(path: str):
     gdf = gpd.read_file(path)
 

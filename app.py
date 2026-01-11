@@ -212,13 +212,32 @@ df["Composite Score"] = compute_composite_score(df, columns, weights)
 # Merge shapes with scores
 merged = zip_gdf.merge(df, on="Zip", how="inner")
 
+
+if merged.empty:
+    st.error("No ZIP geometries matched your score data (merged is empty).")
+
+    # Show samples to diagnose ZIP formatting mismatch
+    if "Zip" in df.columns:
+        st.write("Sample ZIPs in data:", df["Zip"].dropna().astype(str).str.zfill(5).head(20).tolist())
+    else:
+        st.write("DataFrame missing 'Zip' column after load/normalize.")
+
+    st.write("Sample ZIPs in shapes:", zip_gdf["Zip"].dropna().astype(str).head(20).tolist())
+
+    # show counts
+    st.write("Unique ZIPs in data:", int(df["Zip"].nunique()) if "Zip" in df.columns else "n/a")
+    st.write("Unique ZIPs in shapes:", int(zip_gdf["Zip"].nunique()))
+
+    st.stop()
+
 # Display info + map
 st.write("Using top-2 CV columns:", top2)
 st.write("Merged ZIPs:", len(merged))
 
 # Rough center: use merged centroid average (keeps it general)
-center_lat = float(merged.geometry.centroid.y.mean())
-center_lon = float(merged.geometry.centroid.x.mean())
+minx, miny, maxx, maxy = merged.total_bounds
+center_lat = (miny + maxy) / 2
+center_lon = (minx + maxx) / 2
 
 m = create_zip_heatmap(merged, "Composite Score", center=(center_lat, center_lon), zoom=9 if scope.endswith("(fast)") else 4)
 st.components.v1.html(m._repr_html_(), height=720)

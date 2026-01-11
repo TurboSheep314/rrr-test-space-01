@@ -169,7 +169,11 @@ def load_shapes(shp_path: str):
 
 # df = load_scores(DATA_JSON)
 df = load_scores()
-zip_gdf = load_shapes()
+try:
+    zip_gdf = load_shapes()
+except Exception as e:
+    st.error(f"load_shapes failed: {type(e).__name__}: {e}")
+    raise
 
 # Optional speed filter (recommended for first run)
 st.sidebar.header("Map Scope")

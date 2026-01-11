@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import os
 
 import pandas as pd
 import streamlit as st
@@ -16,19 +17,46 @@ DATA_JSON = "data/processed/town_scores.json"
 ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
 
 @st.cache_data
-def load_scores(json_path: str) -> pd.DataFrame:
-    with open(json_path) as f:
-        records = json.load(f)
-    df = pd.DataFrame(records)
-    # Ensure Zip is 5-digit string
-    df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+# def load_scores(json_path: str) -> pd.DataFrame:
+#     with open(json_path) as f:
+#         records = json.load(f)
+#     df = pd.DataFrame(records)
+#     # Ensure Zip is 5-digit string
+#     df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+#     return df
+def load_scores():
+    # Prefer JSON if present (local dev)
+    if os.path.exists("data/processed/town_scores.json"):
+        with open("data/processed/town_scores.json") as f:
+            records = json.load(f)
+        df = pd.DataFrame(records)
+        df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+        return df
+
+    # Cloud fallback: load from raw file committed to repo
+    if os.path.exists("data/raw/town_scores.xlsx"):
+        df = pd.read_excel("data/raw/town_scores.xlsx", header=1)
+    elif os.path.exists("data/raw/town_scores.csv"):
+        df = pd.read_csv("data/raw/town_scores.csv", header=1)
+    else:
+        raise FileNotFoundError("No data found. Expected data/processed/town_scores.json or data/raw/town_scores.(xlsx|csv)")
+
+    # Normalize the two required fields
+    df.columns = [c.strip() for c in df.columns]
+    if "Zip" not in df.columns:
+        raise ValueError(f"Missing 'Zip' column. Found: {list(df.columns)}")
+    if "Overall Score" not in df.columns:
+        raise ValueError(f"Missing 'Overall Score' column. Found: {list(df.columns)}")
+
+    df["Zip"] = df["Zip"].astype(str).str.extract(r"(\d{5})", expand=False).str.zfill(5)
     return df
 
 @st.cache_data
 def load_shapes(shp_path: str):
     return load_zip_shapes(shp_path)
 
-df = load_scores(DATA_JSON)
+# df = load_scores(DATA_JSON)
+df = load_scores()
 zip_gdf = load_shapes(ZCTA_SHP)
 
 # Optional speed filter (recommended for first run)

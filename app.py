@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 import os
+import urllib.request
+import zipfile
 
 import pandas as pd
 import streamlit as st
@@ -15,6 +17,28 @@ st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
 
 DATA_JSON = "data/processed/town_scores.json"
 ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
+
+@st.cache_data
+def load_shapes():
+    """
+    Download + unzip Census ZCTA shapefile at runtime (Streamlit Cloud safe),
+    then load it via geo_utils.load_zip_shapes.
+    """
+    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA5/tl_2024_us_zcta520.zip"
+    extract_dir = "data/zcta_cache"
+    shp_path = os.path.join(extract_dir, "tl_2024_us_zcta520.shp")
+
+    # Download/unzip only if missing
+    if not os.path.exists(shp_path):
+        os.makedirs(extract_dir, exist_ok=True)
+        zip_path = os.path.join(extract_dir, "tl_2024_us_zcta520.zip")
+
+        urllib.request.urlretrieve(url, zip_path)
+
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(extract_dir)
+
+    return load_zip_shapes(shp_path)
 
 @st.cache_data
 # def load_scores(json_path: str) -> pd.DataFrame:
@@ -151,7 +175,7 @@ def load_shapes(shp_path: str):
 
 # df = load_scores(DATA_JSON)
 df = load_scores()
-zip_gdf = load_shapes(ZCTA_SHP)
+zip_gdf = load_shapes()
 
 # Optional speed filter (recommended for first run)
 st.sidebar.header("Map Scope")

@@ -25,7 +25,9 @@ ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
 #     df["Zip"] = df["Zip"].astype(str).str.zfill(5)
 #     return df
 def load_scores():
-    # Prefer JSON if present (local dev)
+    # ----------------------------------------
+    # 1) Prefer processed JSON (local dev)
+    # ----------------------------------------
     if os.path.exists("data/processed/town_scores.json"):
         with open("data/processed/town_scores.json") as f:
             records = json.load(f)
@@ -33,18 +35,31 @@ def load_scores():
         df["Zip"] = df["Zip"].astype(str).str.zfill(5)
         return df
 
-    # Cloud fallback: load from raw file committed to repo
+    # ----------------------------------------
+    # 2) Cloud fallback: load raw data
+    # ----------------------------------------
     if os.path.exists("data/raw/town_scores.xlsx"):
         df = pd.read_excel("data/raw/town_scores.xlsx", header=1)
     elif os.path.exists("data/raw/town_scores.csv"):
         df = pd.read_csv("data/raw/town_scores.csv", header=1)
     else:
-        raise FileNotFoundError("No data found. Expected data/processed/town_scores.json or data/raw/town_scores.(xlsx|csv)")
+        raise FileNotFoundError(
+            "No data found. Expected data/processed/town_scores.json "
+            "or data/raw/town_scores.(xlsx|csv)"
+        )
 
-    # Normalize the two required fields
+    # ----------------------------------------
+    # 3) Clean column headers
+    # ----------------------------------------
     df.columns = df.columns.map(lambda c: str(c).strip())
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)]
 
+    # TEMP DEBUG — remove after first successful deploy
+    st.write("DEBUG columns:", list(df.columns))
+
+    # ----------------------------------------
+    # 4) Auto-detect Zip + Overall Score columns
+    # ----------------------------------------
     def canon(s: str) -> str:
         s = str(s).strip().lower()
         for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
@@ -52,24 +67,36 @@ def load_scores():
         s = " ".join(s.split())
         return s
 
-    canon_map = {canon(c): c for c in df.columns}
+    zip_col = None
+    overall_col = None
 
-    zip_candidates = [
-        "zip", "zipcode", "zip code", "zcta", "zcta5",
-        "zcta5ce", "zcta5ce20", "zcta5ce10"
-    ]
-    overall_candidates = [
-        "overall score", "overall", "score", "total score"
-    ]
+    for c in df.columns:
+        cc = canon(c)
 
-    zip_col = next((canon_map[k] for k in zip_candidates if k in canon_map), None)
-    overall_col = next((canon_map[k] for k in overall_candidates if k in canon_map), None)
+        if zip_col is None and (
+            "zip" in cc
+            or "postal" in cc
+            or "zcta" in cc
+            or cc in ["geoid", "geoid20"]
+        ):
+            zip_col = c
+
+        if overall_col is None and (
+            cc == "overall score"
+            or ("overall" in cc and "score" in cc)
+            or cc in ["overall", "score", "total score"]
+        ):
+            overall_col = c
 
     if zip_col is None:
         raise ValueError(f"Missing ZIP column. Found: {list(df.columns)}")
+
     if overall_col is None:
         raise ValueError(f"Missing Overall Score column. Found: {list(df.columns)}")
 
+    # ----------------------------------------
+    # 5) Normalize + return
+    # ----------------------------------------
     df = df.rename(columns={zip_col: "Zip", overall_col: "Overall Score"})
 
     df["Zip"] = (

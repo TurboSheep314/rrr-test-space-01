@@ -93,17 +93,29 @@ def load_scores(sheet_id: str, gid: int = 0) -> pd.DataFrame:
     df = df.rename(columns={zip_col: "Zip", overall_col: "Overall Score"})
 
     # Bulletproof ZIP normalization
-    df["Zip"] = (
-        df["Zip"].astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-        .str.replace(r"[^0-9]", "", regex=True)
-        .str.zfill(5)
-        .str[-5:]
+    z = (
+    df["Zip"]
+    .astype(str)
+    .str.strip()
+    .str.replace(r"\.0$", "", regex=True)
+    .str.replace(r"[^0-9]", "", regex=True)   # digits only
     )
-    df = df[df["Zip"].str.match(r"^\d{5}$", na=False)]
 
-    return df
+    # IMPORTANT: convert blanks to NA so they don't become "00000"
+    z = z.replace("", pd.NA)
+
+    # If some ZIPs are 4 digits because zeros were dropped earlier, pad them
+    z = z.str.zfill(5)
+
+    # If ZIP+4 appears, keep last 5
+    z = z.str[-5:]
+
+    df["Zip"] = z
+
+    # Keep only real 5-digit ZIPs, and drop 00000
+    df = df[df["Zip"].notna()]
+    df = df[df["Zip"].str.match(r"^\d{5}$", na=False)]
+    df = df[df["Zip"] != "00000"]
 
 
 # ----------------------------
@@ -118,17 +130,49 @@ scope = st.sidebar.selectbox("Scope", ["All US (slow)", "Massachusetts (fast)"],
 if scope == "Massachusetts (fast)":
     zip_gdf = zip_gdf[zip_gdf["Zip"].str.startswith("0")]
 
+# Debug AFTER scope filter (so it matches what you'll merge)
+st.write("DEBUG df columns:", list(df.columns))
+st.write("DEBUG df rows:", len(df))
+st.write("DEBUG df Zip sample:", df["Zip"].head(20).tolist())
+st.write("DEBUG unique df zips:", int(df["Zip"].nunique()))
+
+overlap = set(df["Zip"].dropna()) & set(zip_gdf["Zip"].dropna())
+st.write("DEBUG overlap ZIPs:", len(overlap))
+if overlap:
+    st.write("DEBUG overlap examples:", list(sorted(overlap))[:20])
+
+# Convert likely numeric columns to numeric (keeps Town/Zip as strings)
+for c in df.columns:
+    if c in ["Town", "Zip"]:
+        continue
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
 # Find top-2 “highest variance” columns using CV
 cv = compute_relative_variance_cv(df)
+cv = cv.replace([float("inf"), -float("inf")], pd.NA).dropna()
 top2 = cv.index[:2].tolist()
 
+# Sliders
 st.sidebar.header("Weights (auto-normalized)")
-w_overall = st.sidebar.slider("Overall Score", 0.0, 1.0, 0.50, 0.01)
-w_1 = st.sidebar.slider(top2[0], 0.0, 1.0, 0.25, 0.01)
-w_2 = st.sidebar.slider(top2[1], 0.0, 1.0, 0.25, 0.01)
 
-columns = ["Overall Score", top2[0], top2[1]]
-weights = {"Overall Score": w_overall, top2[0]: w_1, top2[1]: w_2}
+# Always have overall slider
+w_overall = st.sidebar.slider("Overall Score", 0.0, 1.0, 0.50, 0.01)
+
+columns = ["Overall Score"]
+weights = {"Overall Score": w_overall}
+
+if len(top2) >= 1:
+    w_1 = st.sidebar.slider(top2[0], 0.0, 1.0, 0.25, 0.01)
+    columns.append(top2[0])
+    weights[top2[0]] = w_1
+
+if len(top2) >= 2:
+    w_2 = st.sidebar.slider(top2[1], 0.0, 1.0, 0.25, 0.01)
+    columns.append(top2[1])
+    weights[top2[1]] = w_2
+
+if len(top2) < 2:
+    st.warning("Not enough numeric columns to create two variance sliders. Using fewer sliders.")
 
 # Compute composite
 df["Composite Score"] = compute_composite_score(df, columns, weights)

@@ -12,8 +12,12 @@ from src.variance_analysis import compute_relative_variance_cv
 from src.composite_score import compute_composite_score
 from src.heatmap import create_zip_heatmap
 
+
+
 st.set_page_config(layout="wide")
 st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
+
+SHEET_ID = "138F3qdX_VAHuC6eI6z_AfFqTj3xtJMFk"
 
 DATA_JSON = "data/processed/town_scores.json"
 ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
@@ -80,48 +84,32 @@ def read_table_with_best_header(path: str) -> pd.DataFrame:
     st.write("DEBUG: columns =", list(best_df.columns))
     return best_df
 #     return df
-def load_scores():
+def load_scores(sheet_id: str, gid: int = 0):
+    """
+    Load town scores from a public Google Sheet (CSV export),
+    normalize headers, auto-detect Zip and Overall Score columns,
+    and return a clean DataFrame.
+    """
     # ----------------------------------------
-    # 1) Prefer processed JSON (local dev)
+    # 1) Load from Google Sheets
     # ----------------------------------------
-    if os.path.exists("data/processed/town_scores.json"):
-        with open("data/processed/town_scores.json") as f:
-            records = json.load(f)
-        df = pd.DataFrame(records)
-        df["Zip"] = df["Zip"].astype(str).str.zfill(5)
-        return df
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    df = pd.read_csv(url)
 
     # ----------------------------------------
-    # 2) Cloud fallback: load raw data
-    # ----------------------------------------
-    if os.path.exists("data/raw/town_scores.xlsx"):
-        df = read_table_with_best_header("data/raw/town_scores.xlsx")
-    elif os.path.exists("data/raw/town_scores.csv"):
-        df = read_table_with_best_header("data/raw/town_scores.csv")
-    else:
-        raise FileNotFoundError(
-            "No data found. Expected data/processed/town_scores.json "
-            "or data/raw/town_scores.(xlsx|csv)"
-        )
-
-    # ----------------------------------------
-    # 3) Clean column headers
+    # 2) Clean column headers
     # ----------------------------------------
     df.columns = df.columns.map(lambda c: str(c).strip())
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)]
 
-    # TEMP DEBUG — remove after first successful deploy
-    st.write("DEBUG columns:", list(df.columns))
-
     # ----------------------------------------
-    # 4) Auto-detect Zip + Overall Score columns
+    # 3) Auto-detect Zip + Overall Score columns
     # ----------------------------------------
     def canon(s: str) -> str:
         s = str(s).strip().lower()
         for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
             s = s.replace(ch, " ")
-        s = " ".join(s.split())
-        return s
+        return " ".join(s.split())
 
     zip_col = None
     overall_col = None
@@ -146,12 +134,11 @@ def load_scores():
 
     if zip_col is None:
         raise ValueError(f"Missing ZIP column. Found: {list(df.columns)}")
-
     if overall_col is None:
         raise ValueError(f"Missing Overall Score column. Found: {list(df.columns)}")
 
     # ----------------------------------------
-    # 5) Normalize + return
+    # 4) Normalize + return
     # ----------------------------------------
     df = df.rename(columns={zip_col: "Zip", overall_col: "Overall Score"})
 
@@ -166,6 +153,7 @@ def load_scores():
 
 def load_shapes():
     url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
+    #url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
     extract_dir = "data/zcta_cache"
     shp_path = os.path.join(extract_dir, "tl_2024_us_zcta520.shp")
 
@@ -181,7 +169,7 @@ def load_shapes():
     return load_zip_shapes(shp_path)
 
 # df = load_scores(DATA_JSON)
-df = load_scores()
+df = load_scores(SHEET_ID)
 try:
     zip_gdf = load_shapes()
 except Exception as e:

@@ -164,7 +164,20 @@ def load_scores():
 
     return df
 
-def load_shapes(shp_path: str):
+def load_shapes():
+    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA5/tl_2024_us_zcta520.zip"
+    extract_dir = "data/zcta_cache"
+    shp_path = os.path.join(extract_dir, "tl_2024_us_zcta520.shp")
+
+    if not os.path.exists(shp_path):
+        os.makedirs(extract_dir, exist_ok=True)
+        zip_path = os.path.join(extract_dir, "tl_2024_us_zcta520.zip")
+
+        urllib.request.urlretrieve(url, zip_path)
+
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(extract_dir)
+
     return load_zip_shapes(shp_path)
 
 # df = load_scores(DATA_JSON)

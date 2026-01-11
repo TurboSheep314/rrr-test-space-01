@@ -44,18 +44,19 @@ def load_scores():
     # Normalize the two required fields
     df.columns = df.columns.map(lambda c: str(c).strip())
     df = df.loc[:, ~df.columns.str.contains("^Unnamed", na=False)]
-    
+
     def canon(s: str) -> str:
-    s = str(s).strip().lower()
-    for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
-        s = s.replace(ch, " ")
-    s = " ".join(s.split())
-    return s
+        s = str(s).strip().lower()
+        for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
+            s = s.replace(ch, " ")
+        s = " ".join(s.split())
+        return s
 
     canon_map = {canon(c): c for c in df.columns}
 
     zip_candidates = [
-        "zip", "zipcode", "zip code", "zcta", "zcta5", "zcta5ce", "zcta5ce20", "zcta5ce10"
+        "zip", "zipcode", "zip code", "zcta", "zcta5",
+        "zcta5ce", "zcta5ce20", "zcta5ce10"
     ]
     overall_candidates = [
         "overall score", "overall", "score", "total score"

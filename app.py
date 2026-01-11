@@ -18,7 +18,7 @@ st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
 DATA_JSON = "data/processed/town_scores.json"
 ZCTA_SHP = "data/zcta/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
 
-@st.cache_data
+@st.cache_resource
 def load_shapes():
     """
     Download + unzip Census ZCTA shapefile at runtime (Streamlit Cloud safe),

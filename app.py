@@ -165,7 +165,7 @@ def load_scores():
     return df
 
 def load_shapes():
-    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA5/tl_2024_us_zcta520.zip"
+    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
     extract_dir = "data/zcta_cache"
     shp_path = os.path.join(extract_dir, "tl_2024_us_zcta520.shp")
 

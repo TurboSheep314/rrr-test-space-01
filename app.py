@@ -48,7 +48,7 @@ def read_table_with_best_header(path: str) -> pd.DataFrame:
     if path.endswith(".xlsx"):
         for h in [0, 1, 2, 3, 4, 5]:
             try:
-                tmp = pd.read_excel(path, header=h)ß
+                tmp = pd.read_excel(path, header=h)
                 candidates.append((h, tmp))
             except Exception:
                 pass

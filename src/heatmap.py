@@ -4,7 +4,7 @@ from branca.element import Template, MacroElement
 import branca.colormap as cm
 
 
-)
+
 
 def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
     m = folium.Map(location=center, zoom_start=zoom, tiles="cartodbpositron")

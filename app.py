@@ -138,17 +138,17 @@ if scope == "Massachusetts (fast)":
     zip_gdf = zip_gdf[zip_gdf["Zip"].str.startswith("0")]
 
 # Debug AFTER scope filter (so it matches what you'll merge)
-st.write("DEBUG df type:", type(df))
-st.write("DEBUG df columns:", list(df.columns))
-st.write("DEBUG df rows:", len(df))
-st.write("DEBUG df Zip sample:", df["Zip"].head(20).tolist())
-st.write("DEBUG unique df zips:", int(df["Zip"].nunique()))
+# st.write("DEBUG df type:", type(df))
+# st.write("DEBUG df columns:", list(df.columns))
+# st.write("DEBUG df rows:", len(df))
+# st.write("DEBUG df Zip sample:", df["Zip"].head(20).tolist())
+# st.write("DEBUG unique df zips:", int(df["Zip"].nunique()))
 
-st.write("DEBUG zip_gdf type:", type(zip_gdf))
-st.write("DEBUG zip_gdf columns:", list(zip_gdf.columns))
-st.write("DEBUG zip_gdf rows:", len(zip_gdf))
-st.write("DEBUG zip_gdf Zip sample:", zip_gdf["Zip"].head(20).tolist())
-st.write("DEBUG unique shape zips:", int(zip_gdf["Zip"].nunique()))
+# st.write("DEBUG zip_gdf type:", type(zip_gdf))
+# st.write("DEBUG zip_gdf columns:", list(zip_gdf.columns))
+# st.write("DEBUG zip_gdf rows:", len(zip_gdf))
+# st.write("DEBUG zip_gdf Zip sample:", zip_gdf["Zip"].head(20).tolist())
+# st.write("DEBUG unique shape zips:", int(zip_gdf["Zip"].nunique()))
 
 overlap = set(df["Zip"].dropna()) & set(zip_gdf["Zip"].dropna())
 st.write("DEBUG overlap ZIPs:", len(overlap))

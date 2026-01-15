@@ -21,13 +21,11 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         data=gdf,
         columns=["Zip", value_col],
         key_on="feature.properties.Zip",
-        fill_color=colormap,
+        fill_color="YlOrRd",
         fill_opacity=0.7,
         line_opacity=0.2,
         legend_name=value_col,
     ).add_to(m)
-
-    colormap.add_to(m)
 
     # Heat layer at centroids (optional)
     heat_data = [
@@ -56,8 +54,6 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
             localize=True
         ),
     ).add_to(m)
-
-    
 
     # LEGEND (simple HTML box)
     template = """

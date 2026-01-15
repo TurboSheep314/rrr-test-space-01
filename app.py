@@ -161,13 +161,22 @@ for c in df.columns:
         continue
     df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# Find top-2 “highest variance” columns using CV
+# Columns that should NEVER be considered for variance sliders
+exclude_cols = {"Town", "Zip", "Overall Score"}
+
 cv = compute_relative_variance_cv(df)
+
+# Drop excluded columns if present
+cv = cv.drop(labels=[c for c in cv.index if c in exclude_cols], errors="ignore")
+
+# Clean infinities / NaNs
 cv = cv.replace([float("inf"), -float("inf")], pd.NA).dropna()
+
+# Take top 2 remaining
 top2 = cv.index[:2].tolist()
 
-st.write("DEBUG CV top entries:", cv.head(10))
-st.write("DEBUG top2:", top2)
+#st.write("DEBUG CV top entries:", cv.head(10))
+#st.write("DEBUG top2:", top2)
 
 # Sliders
 st.sidebar.header("Weights (auto-normalized)")

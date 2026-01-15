@@ -11,7 +11,24 @@ from src.geo_utils import load_zip_shapes
 from src.variance_analysis import compute_relative_variance_cv
 from src.composite_score import compute_composite_score
 from src.heatmap import create_zip_heatmap
+#----------------------------
+# Helper Functions
+#----------------------------
 
+def to_numeric_loose(s: pd.Series) -> pd.Series:
+    x = s.astype(str).str.strip()
+
+    # treat common missing tokens as NA
+    x = x.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "N/A": pd.NA, "NA": pd.NA})
+
+    # strip common formatting
+    x = x.str.replace(r"[\$,]", "", regex=True)  # "$1,234" -> "1234"
+    x = x.str.replace("%", "", regex=False)      # "12.4%"  -> "12.4"
+
+    # keep only numeric characters (and decimal/minus)
+    x = x.str.replace(r"[^0-9\.\-]", "", regex=True)
+
+    return pd.to_numeric(x, errors="coerce")
 
 # ----------------------------
 # Streamlit page
@@ -155,35 +172,35 @@ st.write("DEBUG overlap ZIPs:", len(overlap))
 if overlap:
     st.write("DEBUG overlap examples:", list(sorted(overlap))[:20])
 
-# Convert likely numeric columns to numeric (keeps Town/Zip as strings)
-for c in df.columns:
-    if c in ["Town", "Zip"]:
-        continue
-    df[c] = pd.to_numeric(df[c], errors="coerce")
 
 # Columns that should NEVER be considered for variance sliders
 exclude_cols = {"Town", "Zip", "Overall Score"}
 
-# cv = compute_relative_variance_cv(df)
+# Convert likely numeric columns to numeric (keeps Town/Zip as strings)
+for c in df.columns:
+    if c in exclude_cols:
+        continue
+    df[c] = to_numeric_loose(df[c])
 
-# # Drop excluded columns if present
-# cv = cv.drop(labels=[c for c in cv.index if c in exclude_cols], errors="ignore")
+# DEBUG: show which columns actually became numeric
+candidates = [c for c in df.columns if c not in exclude_cols]
+nonnull = df[candidates].notna().sum().sort_values(ascending=False)
+st.write("DEBUG numeric non-null counts (top 25):", nonnull.head(25))
 
-# # Clean infinities / NaNs
-# cv = cv.replace([float("inf"), -float("inf")], pd.NA).dropna()
+# Only keep columns with enough numeric values (you have ~17 overlapping zips)
+keep = nonnull[nonnull >= 5].index.tolist()
+st.write("DEBUG numeric columns kept:", keep)
 
-# # Take top 2 remaining
-# top2 = cv.index[:2].tolist()
-
-# st.write("DEBUG CV top entries:", cv.head(10))
-# st.write("DEBUG top2:", top2)
-cv = compute_relative_variance_cv(df)
-top2 = cv.index[:2].tolist()
-
-st.write("DEBUG CV top entries:", cv.head(10))
-st.write("DEBUG top2:", top2)
-st.write("DEBUG non-null counts:", df.notna().sum().sort_values(ascending=False).head(30))
-
+#st.write("DEBUG CV top entries:", cv.head(10))
+#st.write("DEBUG top2:", top2)
+#st.write("DEBUG non-null counts:", df.notna().sum().sort_values(ascending=False).head(30))
+if len(keep) == 0:
+    cv = pd.Series(dtype=float)
+    top2 = []
+else:
+    cv = compute_relative_variance_cv(df)
+    top2 = cv.index[:2].tolist()
+    
 # Sliders
 st.sidebar.header("Weights (top-2 variance only)")
 

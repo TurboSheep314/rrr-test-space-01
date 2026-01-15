@@ -13,7 +13,7 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
     colors=["blue", "cyan", "yellow", "orange", "red"],
     vmin=float(gdf[value_col].min()),
     vmax=float(gdf[value_col].max()),
-    caption="Composite Score"
+    caption="Composite Score")
 
     # — OPTIONAL: choropleth fill by score — colors ZIP areas
     folium.Choropleth(
@@ -27,22 +27,22 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         legend_name=value_col,
     ).add_to(m)
 
-    # Heat layer at centroids (optional) (Commented so the zipcode is the only thing that shows right now)
-    # heat_data = [
-    #     [
-    #         row.geometry.centroid.y,
-    #         row.geometry.centroid.x,
-    #         row[value_col]
-    #     ]
-    #     for _, row in gdf.iterrows()
-    #     if row.geometry is not None
-    # ]
-    # HeatMap(
-    #     heat_data,
-    #     radius=25,
-    #     blur=18,
-    #     min_opacity=0.4
-    # ).add_to(m)
+    # Heat layer at centroids (optional)
+    heat_data = [
+        [
+            row.geometry.centroid.y,
+            row.geometry.centroid.x,
+            row[value_col]
+        ]
+        for _, row in gdf.iterrows()
+        if row.geometry is not None
+    ]
+    HeatMap(
+        heat_data,
+        radius=25,
+        blur=18,
+        min_opacity=0.4
+    ).add_to(m)
 
     # Hover tooltips (popups) on top
     folium.GeoJson(

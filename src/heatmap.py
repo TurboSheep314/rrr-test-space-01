@@ -55,6 +55,8 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         ),
     ).add_to(m)
 
+    colormap.add_to(m)
+
     # LEGEND (simple HTML box)
     template = """
     {% macro html(this, kwargs) %}

@@ -175,28 +175,30 @@ cv = cv.replace([float("inf"), -float("inf")], pd.NA).dropna()
 # Take top 2 remaining
 top2 = cv.index[:2].tolist()
 
-#st.write("DEBUG CV top entries:", cv.head(10))
-#st.write("DEBUG top2:", top2)
+st.write("DEBUG CV top entries:", cv.head(10))
+st.write("DEBUG top2:", top2)
 
 # Sliders
-st.sidebar.header("Weights (auto-normalized)")
-w_overall = st.sidebar.slider("Overall Score", 0.0, 1.0, 0.50, 0.01)
+st.sidebar.header("Weights (top-2 variance only)")
 
-columns = ["Overall Score"]
-weights = {"Overall Score": w_overall}
+columns = []
+weights = {}
 
 if len(top2) >= 1:
-    w_1 = st.sidebar.slider(top2[0], 0.0, 1.0, 0.25, 0.01)
+    w_1 = st.sidebar.slider(top2[0], 0.0, 1.0, 0.50, 0.01)
     columns.append(top2[0])
     weights[top2[0]] = w_1
 
 if len(top2) >= 2:
-    w_2 = st.sidebar.slider(top2[1], 0.0, 1.0, 0.25, 0.01)
+    w_2 = st.sidebar.slider(top2[1], 0.0, 1.0, 0.50, 0.01)
     columns.append(top2[1])
     weights[top2[1]] = w_2
 
 if len(top2) < 2:
-    st.warning("Not enough numeric columns to create two variance sliders. Using fewer sliders.")
+    st.warning(
+        "Not enough numeric columns to create two variance sliders. "
+        "Composite score will use available columns only."
+    )
 
 # Compute composite
 df["Composite Score"] = compute_composite_score(df, columns, weights)

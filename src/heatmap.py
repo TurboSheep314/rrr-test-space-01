@@ -27,6 +27,8 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         legend_name=value_col,
     ).add_to(m)
 
+    colormap.add_to(m)
+
     # Heat layer at centroids (optional)
     heat_data = [
         [
@@ -55,7 +57,7 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         ),
     ).add_to(m)
 
-    colormap.add_to(m)
+    
 
     # LEGEND (simple HTML box)
     template = """

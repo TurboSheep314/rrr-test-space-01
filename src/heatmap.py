@@ -34,15 +34,29 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
     
     
 
+    # legend HTML
     template = """
-    {% macro html(this,kwargs) %}
-    <div style="position: fixed; bottom: 50px; left: 50px; z-index:9999; background-color:white; padding:10px;">
-        <b>Composite Score</b><br>
+    {% macro html(this, kwargs) %}
+    <div style="
+        position: fixed;
+        bottom: 50px;
+        left: 50px;
+        z-index: 9999;
+        background-color: white;
+        padding: 8px;
+        font-size: 14px;
+        border: 1px solid #777;
+    ">
+        <strong>Composite Score</strong><br>
         Hotter = Higher Score
     </div>
     {% endmacro %}
     """
-    m.get_root().add_child(MacroElement().add_child(Template(template)))
+
+    legend = MacroElement()
+    legend._template = Template(template)
+
+    m.get_root().add_child(legend)
 
    
 

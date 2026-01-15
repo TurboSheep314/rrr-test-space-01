@@ -156,9 +156,11 @@ if scope == "Massachusetts (fast)":
     zip_gdf = zip_gdf[zip_gdf["Zip"].str.startswith("0")]
 
 overlap = set(df["Zip"].dropna()) & set(zip_gdf["Zip"].dropna())
-st.write("DEBUG overlap ZIPs:", len(overlap))
-if overlap:
-    st.write("DEBUG overlap examples:", list(sorted(overlap))[:20])
+# ***** DEBUG *****
+#st.write("DEBUG overlap ZIPs:", len(overlap))
+
+#if overlap:
+#    st.write("DEBUG overlap examples:", list(sorted(overlap))[:20])
 
 
 # Columns that should NEVER be considered for variance sliders
@@ -173,11 +175,13 @@ for c in df.columns:
 # DEBUG: show which columns actually became numeric
 candidates = [c for c in df.columns if c not in exclude_cols]
 nonnull = df[candidates].notna().sum().sort_values(ascending=False)
-st.write("DEBUG numeric non-null counts (top 25):", nonnull.head(25))
+
+# ***** DEBUG *****
+#st.write("DEBUG numeric non-null counts (top 25):", nonnull.head(25))
 
 # Only keep columns with enough numeric values (you have ~17 overlapping zips)
 keep = nonnull[nonnull >= 5].index.tolist()
-st.write("DEBUG numeric columns kept:", keep)
+#st.write("DEBUG numeric columns kept:", keep)
 
 #st.write("DEBUG CV top entries:", cv.head(10))
 #st.write("DEBUG top2:", top2)
@@ -217,17 +221,18 @@ df["Composite Score"] = compute_composite_score(df, columns, weights)
 # Merge shapes with scores
 merged = zip_gdf.merge(df, on="Zip", how="inner")
 
-# Debug + stop if empty
-if merged.empty:
-    st.error("No ZIP geometries matched your score data (merged is empty).")
-    st.write("Sample ZIPs in data:", df["Zip"].head(20).tolist())
-    st.write("Sample ZIPs in shapes:", zip_gdf["Zip"].head(20).tolist())
-    st.write("Unique ZIPs in data:", int(df["Zip"].nunique()))
-    st.write("Unique ZIPs in shapes:", int(zip_gdf["Zip"].nunique()))
-    st.stop()
+# ***** DEBUG *****
+# # Debug + stop if empty
+# if merged.empty:
+#     st.error("No ZIP geometries matched your score data (merged is empty).")
+#     st.write("Sample ZIPs in data:", df["Zip"].head(20).tolist())
+#     st.write("Sample ZIPs in shapes:", zip_gdf["Zip"].head(20).tolist())
+#     st.write("Unique ZIPs in data:", int(df["Zip"].nunique()))
+#     st.write("Unique ZIPs in shapes:", int(zip_gdf["Zip"].nunique()))
+#     st.stop()
 
-st.write("Using top-2 CV columns:", top2)
-st.write("Merged ZIPs:", len(merged))
+# st.write("Using top-2 CV columns:", top2)
+# st.write("Merged ZIPs:", len(merged))
 
 # Safe center using bounds
 minx, miny, maxx, maxy = merged.total_bounds

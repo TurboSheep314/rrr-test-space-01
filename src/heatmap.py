@@ -39,7 +39,7 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
     ]
     HeatMap(
         heat_data,
-        radius=25,
+        radius=0.25,
         blur=18,
         min_opacity=0.4
     ).add_to(m)

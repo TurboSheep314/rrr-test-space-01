@@ -6,6 +6,7 @@ import zipfile
 
 import pandas as pd
 import streamlit as st
+from streamlit_folium import st_folium
 
 from src.geo_utils import load_zip_shapes
 from src.variance_analysis import compute_relative_variance_cv
@@ -154,19 +155,6 @@ scope = st.sidebar.selectbox("Scope", ["All US (slow)", "Massachusetts (fast)"],
 if scope == "Massachusetts (fast)":
     zip_gdf = zip_gdf[zip_gdf["Zip"].str.startswith("0")]
 
-# Debug AFTER scope filter (so it matches what you'll merge)
-# st.write("DEBUG df type:", type(df))
-# st.write("DEBUG df columns:", list(df.columns))
-# st.write("DEBUG df rows:", len(df))
-# st.write("DEBUG df Zip sample:", df["Zip"].head(20).tolist())
-# st.write("DEBUG unique df zips:", int(df["Zip"].nunique()))
-
-# st.write("DEBUG zip_gdf type:", type(zip_gdf))
-# st.write("DEBUG zip_gdf columns:", list(zip_gdf.columns))
-# st.write("DEBUG zip_gdf rows:", len(zip_gdf))
-# st.write("DEBUG zip_gdf Zip sample:", zip_gdf["Zip"].head(20).tolist())
-# st.write("DEBUG unique shape zips:", int(zip_gdf["Zip"].nunique()))
-
 overlap = set(df["Zip"].dropna()) & set(zip_gdf["Zip"].dropna())
 st.write("DEBUG overlap ZIPs:", len(overlap))
 if overlap:
@@ -200,7 +188,7 @@ if len(keep) == 0:
 else:
     cv = compute_relative_variance_cv(df)
     top2 = cv.index[:2].tolist()
-    
+
 # Sliders
 st.sidebar.header("Weights (top-2 variance only)")
 

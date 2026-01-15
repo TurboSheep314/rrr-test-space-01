@@ -9,11 +9,11 @@ import branca.colormap as cm
 def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
     m = folium.Map(location=center, zoom_start=zoom, tiles="cartodbpositron")
 
-    colormap = cm.LinearColormap(
-    colors=["blue", "cyan", "yellow", "orange", "red"],
-    vmin=float(gdf[value_col].min()),
-    vmax=float(gdf[value_col].max()),
-    caption="Composite Score")
+    # colormap = cm.LinearColormap(
+    # colors=["blue", "cyan", "yellow", "orange", "red"],
+    # vmin=float(gdf[value_col].min()),
+    # vmax=float(gdf[value_col].max()),
+    # caption="Composite Score")
 
     # — OPTIONAL: choropleth fill by score — colors ZIP areas
     folium.Choropleth(

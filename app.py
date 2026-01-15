@@ -12,6 +12,9 @@ from src.geo_utils import load_zip_shapes
 from src.variance_analysis import compute_relative_variance_cv
 from src.composite_score import compute_composite_score
 from src.heatmap import create_zip_heatmap
+
+import json
+from pathlib import Path
 #----------------------------
 # Helper Functions
 #----------------------------
@@ -34,11 +37,62 @@ def to_numeric_loose(s: pd.Series) -> pd.Series:
 # ----------------------------
 # Streamlit page
 # ----------------------------
-st.set_page_config(layout="wide")
-st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
+
+
+CONFIG_PATH = Path(__file__).parent / "sheets.json"
+
+if not CONFIG_PATH.exists():
+    st.error("Missing sheets.json (put it in the same folder as app.py)")
+    st.stop()
+
+try:
+    SHEETS_CFG = json.loads(CONFIG_PATH.read_text())
+except Exception as e:
+    st.error("Could not parse sheets.json (check JSON formatting)")
+    st.exception(e)
+    st.stop()
+
+# Build dropdown labels from comparison_city (and keep a stable mapping back to dataset keys)
+options = []
+for dataset_key, cfg in SHEETS_CFG.items():
+    city = cfg.get("comparison_city", dataset_key)
+    options.append((city, dataset_key))
+
+# Sort by city label (nice UX)
+options.sort(key=lambda x: x[0].lower())
+
+st.sidebar.header("Dataset")
+selected_city = st.sidebar.selectbox(
+    "Comparison city",
+    [city for city, _ in options],
+    index=0,
+    key="comparison_city"
+)
+
+# Map back to the dataset config
+selected_dataset_key = dict(options)[selected_city]
+cfg = SHEETS_CFG[selected_dataset_key]
+
+comparison_city = cfg.get("comparison_city", selected_city)
+st.title(f"ZIP Heatmap — From {comparison_city}")
+
+# Keep these ready for later wiring (doesn't change your loading yet)
+#SHEET_ID = cfg.get("spreadsheet_id")
+#GID = int(cfg.get("gid", 0))
+
+
+#st.set_page_config(layout="wide")
+#st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
 
 SHEET_ID = "138F3qdX_VAHuC6eI6z_AfFqTj3xtJMFk"
 GID = 1097485755  # tab gid from your URL
+
+
+
+
+
+
+
 
 
 # ----------------------------
@@ -281,3 +335,9 @@ if map_state is not None:
         )
     if map_state.get("zoom") is not None:
         st.session_state["map_zoom"] = map_state["zoom"]
+
+# Reset button
+if st.sidebar.button("Reset map view"):
+    st.session_state["map_center"] = (center_lat, center_lon)
+    st.session_state["map_zoom"] = 9 if scope.endswith("(fast)") else 4
+

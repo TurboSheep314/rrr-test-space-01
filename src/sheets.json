@@ -1,0 +1,16 @@
+{
+  "Zip Score Dataset A": {
+    "spreadsheet_id": "138F3qdX_VAHuC6eI6z_AfFqTj3xtJMFk",
+    "worksheet": "Scores",
+    "gid": 1097485755,
+    "header_row": 1,
+    "comparison_city": "Buffalo, NY"
+  },
+  "Zip Score Dataset B": {
+    "spreadsheet_id": "BBB...",
+    "worksheet": "Scores",
+    "gid": 987654321,
+    "header_row": 1,
+    "comparison_city": "Cambridge, MA"
+  }
+}

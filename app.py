@@ -241,4 +241,38 @@ m = create_zip_heatmap(
     zoom=9 if scope.endswith("(fast)") else 4,
 )
 
-st.components.v1.html(m._repr_html_(), height=720)
+#st.components.v1.html(m._repr_html_(), height=720)
+# --- Persist user’s map view between reruns ---
+
+# Initialize session state map center + zoom (only on first load)
+if "map_center" not in st.session_state:
+    st.session_state["map_center"] = (center_lat, center_lon)
+
+if "map_zoom" not in st.session_state:
+    st.session_state["map_zoom"] = 9 if scope.endswith("(fast)") else 4
+
+# Create the folium map using session state
+m = create_zip_heatmap(
+    merged,
+    "Composite Score",
+    center=st.session_state["map_center"],
+    zoom=st.session_state["map_zoom"],
+)
+
+# Render map and capture user interactions
+map_state = st_folium(
+    m,
+    height=720,
+    returned_objects=["center", "zoom"],
+    key="zip_map",
+)
+
+# If user moved the map (pan/zoom), update session state
+if map_state is not None:
+    if map_state.get("center"):
+        st.session_state["map_center"] = (
+            map_state["center"]["lat"],
+            map_state["center"]["lng"],
+        )
+    if map_state.get("zoom") is not None:
+        st.session_state["map_zoom"] = map_state["zoom"]

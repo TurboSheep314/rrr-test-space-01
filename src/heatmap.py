@@ -21,7 +21,7 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         data=gdf,
         columns=["Zip", value_col],
         key_on="feature.properties.Zip",
-        fill_color="YlOrRd",
+        fill_color="colormap",
         fill_opacity=0.7,
         line_opacity=0.2,
         legend_name=value_col,

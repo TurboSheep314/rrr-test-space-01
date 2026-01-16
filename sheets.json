@@ -7,10 +7,10 @@
     "comparison_city": "Buffalo, NY"
   },
   "Zip Score Dataset B": {
-    "spreadsheet_id": "BBB...",
+    "spreadsheet_id": "1aZmL78kZZgcKa4anOHkKYC-TRQyaHrJm",
     "worksheet": "Scores",
-    "gid": 987654321,
+    "gid": 1097485755,
     "header_row": 1,
-    "comparison_city": "Cambridge, MA"
+    "comparison_city": "Memphis"
   }
 }

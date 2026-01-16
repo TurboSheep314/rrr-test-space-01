@@ -77,8 +77,8 @@ comparison_city = cfg.get("comparison_city", selected_city)
 st.title(f"ZIP Heatmap — From {comparison_city}")
 
 # Keep these ready for later wiring (doesn't change your loading yet)
-#SHEET_ID = cfg.get("spreadsheet_id")
-#GID = int(cfg.get("gid", 0))
+SHEET_ID = cfg.get("spreadsheet_id")
+GID = int(cfg.get("gid", 0))
 
 st.set_page_config(layout="wide")
 st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")

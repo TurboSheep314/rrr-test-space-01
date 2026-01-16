@@ -2,6 +2,7 @@ import folium
 from folium.plugins import HeatMap
 from branca.element import Template, MacroElement
 import branca.colormap as cm
+import math
 
 
 

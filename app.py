@@ -80,12 +80,11 @@ st.title(f"ZIP Heatmap — From {comparison_city}")
 #SHEET_ID = cfg.get("spreadsheet_id")
 #GID = int(cfg.get("gid", 0))
 
+st.set_page_config(layout="wide")
+st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
 
-#st.set_page_config(layout="wide")
-#st.title("ZIP Heatmap (Overall + Top-2 Variance Sliders)")
-
-SHEET_ID = "138F3qdX_VAHuC6eI6z_AfFqTj3xtJMFk"
-GID = 1097485755  # tab gid from your URL
+#SHEET_ID = "138F3qdX_VAHuC6eI6z_AfFqTj3xtJMFk"
+#GID = 1097485755  # tab gid from your URL
 
 
 

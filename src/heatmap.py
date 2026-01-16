@@ -28,15 +28,35 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
     ).add_to(m)
 
     # Heat layer at centroids (optional)
-    heat_data = [
-        [
-            row.geometry.centroid.y,
-            row.geometry.centroid.x,
-            row[value_col]
-        ]
-        for _, row in gdf.iterrows()
-        if row.geometry is not None
-    ]
+    # heat_data = [
+    #     [
+    #         row.geometry.centroid.y,
+    #         row.geometry.centroid.x,
+    #         row[value_col]
+    #     ]
+    #     for _, row in gdf.iterrows()
+    #     if row.geometry is not None
+    # ]
+    heat_data = []
+    for _, row in gdf.iterrows():
+        if row.geometry is None:
+            continue
+        
+        lat = row.geometry.centroid.y
+        lon = row.geometry.centroid.x
+        val = row.get(value_col)
+
+        # Skip if score is None or NaN
+        if val is None:
+            continue
+        try:
+            # this will catch NaNs
+            if math.isnan(float(val)):
+                continue
+        except Exception:
+            continue
+    
+    heat_data.append([lat, lon, float(val)])
     HeatMap(
         heat_data,
         radius=0.25,

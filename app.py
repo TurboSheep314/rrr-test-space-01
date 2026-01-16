@@ -271,6 +271,21 @@ if len(top2) < 2:
 # Compute composite
 df["Composite Score"] = compute_composite_score(df, columns, weights)
 
+# --- Filter out ZIPs that have no geometry before merging ---
+
+# Convert both to strings in a clean, consistent format
+df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+zip_gdf["Zip"] = zip_gdf["Zip"].astype(str).str.zfill(5)
+
+# Find only the ZIP codes that exist in both
+valid_zips = set(df["Zip"]).intersection(zip_gdf["Zip"])
+
+# Filter your score dataframe to only keep those valid ZIPs
+df = df[df["Zip"].isin(valid_zips)].copy()
+
+# Optional: show how many were dropped for transparency
+st.write(f"Dropped {len(set(df['Zip']) ^ valid_zips)} ZIPs that have no matching ZCTA geometry.")
+
 # Merge shapes with scores
 merged = zip_gdf.merge(df, on="Zip", how="inner")
 # Which ZIPs matched?

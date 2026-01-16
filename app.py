@@ -273,6 +273,15 @@ df["Composite Score"] = compute_composite_score(df, columns, weights)
 
 # Merge shapes with scores
 merged = zip_gdf.merge(df, on="Zip", how="inner")
+# Which ZIPs matched?
+matched_zips = set(merged["Zip"].astype(str))
+
+# Which ZIPs *did not* match?
+all_data_zips = set(df["Zip"].astype(str))
+missing_zips = sorted(list(all_data_zips - matched_zips))
+
+st.write("🔍 Unmatched ZIP codes:", missing_zips)
+st.write("Total missing ZIPs:", len(missing_zips))
 
 # ***** DEBUG *****
 # # Debug + stop if empty

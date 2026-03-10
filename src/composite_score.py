@@ -12,8 +12,10 @@ def compute_composite_score(
 
     z = (df[columns] - df[columns].mean()) / df[columns].std()
 
-    # Normalize weights to sum to 1
+    # Normalize weights to sum to 1 (guard against zeros)
     w_sum = sum(weights.values())
+    if w_sum == 0:
+        raise ValueError("Sum of weights is zero; cannot compute composite score.")
     norm_weights = {k: v / w_sum for k, v in weights.items()}
 
     composite = sum(

@@ -1,0 +1,1009 @@
+import json
+import os
+import urllib.request
+import zipfile
+import math
+import statistics
+import time
+import hashlib
+from functools import lru_cache
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+import numpy as np
+import pandas as pd
+import requests
+from flask import Flask, request, render_template_string, redirect, url_for, session, Response
+
+from src.geo_utils import load_zip_shapes
+from src.composite_score import compute_composite_score
+from src.heatmap import create_zip_heatmap
+
+
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = APP_DIR / "sheets.json"
+INTAKE_PATH = APP_DIR / "out" / "intake_profile.json"
+MOVING_FROM_PATH = APP_DIR / "data" / "moving_from.csv"
+MOVING_TO_PATH = APP_DIR / "data" / "moving_to.csv"
+SYNTHETIC_HOMES_PATH = APP_DIR / "data" / "processed" / "synthetic_homes_from.csv"
+HOME_SALES_PATH = APP_DIR / "data" / "Home Sales Data - previous year.csv"
+
+ALPHA_BASE = 0.3
+SCALE = 100.0
+SIGMA_EPSILON = 1e-6
+TARGET_SPREAD = 10.0
+
+FEATURES = [
+    "Education",
+    "Healthcare & Fitness",
+    "Commute/Transit Score",
+    "Accessibility",
+    "Culture/Entertainment",
+]
+FEATURE_FIELDS = {
+    "Education": "education",
+    "Healthcare & Fitness": "healthcare_fitness",
+    "Commute/Transit Score": "commute_transit",
+    "Accessibility": "accessibility",
+    "Culture/Entertainment": "culture_entertainment",
+}
+
+SYSTEM_PROMPT = """
+You are a friendly housing search assistant. Your job is to ask short, one-at-a-time questions
+that help build a structured profile for ranking neighborhoods and ZIP codes.
+
+Rules:
+- Ask only ONE question per turn.
+- Keep it short and conversational.
+- The FIRST assistant message should be a short introduction and then ask the first question.
+- The first question must ask where the user lives now (current town/city).
+- If the user asks an unrelated question, answer it briefly (1 sentence max), then continue the intake by asking the next question.
+- When you can infer an answer from the user's last message, update the profile.
+- If a field is already filled, don't ask about it again.
+- Return your result as strict JSON ONLY with keys: assistant_message, updated_profile, is_complete.
+- updated_profile must be an object with the current filled fields.
+- is_complete should be true when all required fields are filled.
+
+Required fields:
+- current_town (string)
+- current_address (string)
+- education_rating (integer, 1-10)
+- healthcare_fitness_rating (integer, 1-10)
+- commute_transit_rating (integer, 1-10)
+- accessibility_rating (integer, 1-10)
+- culture_entertainment_rating (integer, 1-10)
+""".strip()
+
+REQUIRED_FIELDS = [
+    "current_town",
+    "current_address",
+    "education_rating",
+    "healthcare_fitness_rating",
+    "commute_transit_rating",
+    "accessibility_rating",
+    "culture_entertainment_rating",
+]
+
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").lower()
+PERSIST_INTAKE_TO_DISK = os.getenv("PERSIST_INTAKE_TO_DISK", "false").lower() == "true"
+
+
+def get_llm_provider() -> str:
+    if LLM_PROVIDER in {"openai", "ollama"}:
+        return LLM_PROVIDER
+    if OPENAI_API_KEY:
+        return "openai"
+    return "ollama"
+
+def to_numeric_loose(s: pd.Series) -> pd.Series:
+    x = s.astype(str).str.strip()
+    x = x.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "N/A": pd.NA, "NA": pd.NA})
+    x = x.str.replace(r"[\$,]", "", regex=True)
+    x = x.str.replace("%", "", regex=False)
+    x = x.str.replace(r"[^0-9\.\-]", "", regex=True)
+    return pd.to_numeric(x, errors="coerce")
+
+
+def canon(col: str) -> str:
+    s = str(col).strip().lower()
+    for ch in ["(", ")", "%", "$", ",", "/", "-", "_"]:
+        s = s.replace(ch, " ")
+    return " ".join(s.split())
+
+
+def normalize_zip_series(s: pd.Series) -> pd.Series:
+    raw = s.astype(str).str.strip()
+    raw = raw.mask(raw.str.upper().eq("NOT RECOGNIZED"), pd.NA)
+    z = (
+        raw
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"[^0-9]", "", regex=True)
+    )
+    z = z.replace("", pd.NA)
+    return z.str.zfill(5).str[-5:]
+
+
+def standardize_score_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed")]]
+
+    rename_map = {}
+    for c in df.columns:
+        cc = canon(c)
+        if cc in {"town city", "town"}:
+            rename_map[c] = "Town"
+        elif cc == "zip":
+            rename_map[c] = "Zip"
+        elif cc == "overall score" or ("overall" in cc and "score" in cc):
+            rename_map[c] = "Overall Score"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    if "Zip" not in df.columns:
+        raise ValueError(f"Missing ZIP column. Found: {list(df.columns)}")
+
+    df["Zip"] = normalize_zip_series(df["Zip"])
+    df = df[df["Zip"].notna()]
+    df = df[df["Zip"].str.match(r"^\d{5}$", na=False)]
+    df = df[df["Zip"] != "00000"]
+
+    for c in df.columns:
+        if c in {"Town", "Zip", "State", "County", "Overall Score"}:
+            continue
+        df[c] = to_numeric_loose(df[c])
+
+    return df
+
+
+@lru_cache(maxsize=1)
+def load_moving_to_scores() -> pd.DataFrame:
+    if not MOVING_TO_PATH.exists():
+        raise FileNotFoundError(f"Missing {MOVING_TO_PATH}")
+    df = pd.read_csv(MOVING_TO_PATH)
+    return standardize_score_df(df)
+
+
+@lru_cache(maxsize=1)
+def load_moving_from_truth() -> Dict[str, Dict[str, Any]]:
+    if not MOVING_FROM_PATH.exists():
+        raise FileNotFoundError(f"Missing {MOVING_FROM_PATH}")
+    df = standardize_score_df(pd.read_csv(MOVING_FROM_PATH))
+    truth: Dict[str, Dict[str, Any]] = {}
+    if df.empty:
+        return truth
+
+    for _, row in df.iterrows():
+        row_truth = {
+            feature: float(row[feature])
+            for feature in FEATURES
+            if feature in df.columns and pd.notna(row.get(feature))
+        }
+        if not row_truth:
+            continue
+
+        town_name = str(row.get("Town", "")).strip()
+        state_name = str(row.get("State", "")).strip()
+        if town_name:
+            truth[town_name] = row_truth
+            if state_name:
+                truth[f"{town_name}, {state_name}"] = row_truth
+    return truth
+
+
+@lru_cache(maxsize=1)
+def load_synthetic_homes() -> pd.DataFrame:
+    if not SYNTHETIC_HOMES_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing {SYNTHETIC_HOMES_PATH}. Run scripts/generate_synthetic_homes.py first."
+        )
+    df = pd.read_csv(SYNTHETIC_HOMES_PATH)
+    if "zip" in df.columns:
+        df["zip"] = normalize_zip_series(df["zip"])
+    if "town" in df.columns:
+        df["town_norm"] = df["town"].astype(str).map(normalize_town)
+    return df
+
+
+def extract_zip_from_text(text: str) -> Optional[str]:
+    digits = "".join(ch for ch in str(text) if ch.isdigit())
+    if len(digits) >= 5:
+        return digits[:5]
+    return None
+
+
+def select_synthetic_home(address: str, current_town: str) -> Optional[Dict[str, Any]]:
+    df = load_synthetic_homes()
+    if df.empty:
+        return None
+
+    subset = pd.DataFrame()
+    address_zip = extract_zip_from_text(address)
+    if address_zip and "zip" in df.columns:
+        subset = df[df["zip"] == address_zip]
+
+    if subset.empty and current_town:
+        town_norm = normalize_town(current_town)
+        if "town_norm" in df.columns:
+            subset = df[df["town_norm"] == town_norm]
+
+    if subset.empty:
+        return None
+
+    digest = hashlib.sha256(f"{current_town}|{address}".encode("utf-8")).hexdigest()
+    idx = int(digest, 16) % len(subset)
+    row = subset.iloc[idx]
+    return {
+        "town": row.get("town"),
+        "zip": row.get("zip"),
+        "home_price": float(row.get("home_price")),
+        "price_per_sqft": float(row.get("price_per_sqft")),
+        "interior_sqft": float(row.get("interior_sqft")),
+        "lot_size_sqft": float(row.get("lot_size_sqft")),
+        "bedrooms": int(row.get("bedrooms")),
+        "bathrooms": int(row.get("bathrooms")),
+    }
+
+
+@lru_cache(maxsize=1)
+def load_home_sales() -> pd.DataFrame:
+    if not HOME_SALES_PATH.exists():
+        raise FileNotFoundError(f"Missing {HOME_SALES_PATH}")
+
+    df = pd.read_csv(HOME_SALES_PATH)
+    df["zip"] = normalize_zip_series(df["ZIP OR POSTAL CODE"])
+    df["city_norm"] = df["CITY"].astype(str).map(normalize_town)
+    numeric_cols = {
+        "PRICE": "price",
+        "BEDS": "beds",
+        "BATHS": "baths",
+        "SQUARE FEET": "square_feet",
+        "LOT SIZE": "lot_size",
+        "LATITUDE": "latitude",
+        "LONGITUDE": "longitude",
+        "$/SQUARE FEET": "price_per_sqft",
+    }
+    for source_col, target_col in numeric_cols.items():
+        df[target_col] = pd.to_numeric(df[source_col], errors="coerce")
+
+    df = df.dropna(subset=["latitude", "longitude", "price"])
+    return df
+
+
+def score_home_match(home_row: pd.Series, synthetic_home: Dict[str, Any]) -> float:
+    # Relative-distance score; lower is better.
+    components = []
+    comparisons = [
+        ("price", "home_price"),
+        ("beds", "bedrooms"),
+        ("baths", "bathrooms"),
+        ("square_feet", "interior_sqft"),
+        ("lot_size", "lot_size_sqft"),
+    ]
+    for sale_key, synth_key in comparisons:
+        sale_val = home_row.get(sale_key)
+        synth_val = synthetic_home.get(synth_key)
+        if pd.isna(sale_val) or synth_val in (None, 0):
+            continue
+        denom = max(abs(float(synth_val)), 1.0)
+        components.append(abs(float(sale_val) - float(synth_val)) / denom)
+
+    if not components:
+        return float("inf")
+    return float(sum(components) / len(components))
+
+
+def find_best_home_matches(synthetic_home: Optional[Dict[str, Any]], limit: int = 5) -> list[Dict[str, Any]]:
+    if not synthetic_home:
+        return []
+
+    df = load_home_sales()
+    subset = pd.DataFrame()
+
+    synth_zip = synthetic_home.get("zip")
+    if synth_zip:
+        subset = df[df["zip"] == synth_zip]
+
+    if subset.empty and synthetic_home.get("town"):
+        subset = df[df["city_norm"] == normalize_town(str(synthetic_home["town"]))]
+
+    if subset.empty:
+        subset = df
+
+    ranked = subset.copy()
+    ranked["match_score"] = ranked.apply(score_home_match, axis=1, synthetic_home=synthetic_home)
+    ranked = ranked.replace([np.inf, -np.inf], np.nan).dropna(subset=["match_score"])
+    ranked = ranked.sort_values("match_score").head(limit)
+
+    results = []
+    for _, row in ranked.iterrows():
+        results.append(
+            {
+                "address": row.get("ADDRESS"),
+                "city": row.get("CITY"),
+                "zip": row.get("zip"),
+                "price": float(row.get("price")) if pd.notna(row.get("price")) else None,
+                "beds": float(row.get("beds")) if pd.notna(row.get("beds")) else None,
+                "baths": float(row.get("baths")) if pd.notna(row.get("baths")) else None,
+                "square_feet": float(row.get("square_feet")) if pd.notna(row.get("square_feet")) else None,
+                "latitude": float(row.get("latitude")),
+                "longitude": float(row.get("longitude")),
+                "match_score": float(row.get("match_score")),
+                "url": row.get("URL (SEE https://www.redfin.com/buy-a-home/comparative-market-analysis FOR INFO ON PRICING)"),
+            }
+        )
+    return results
+
+
+def ensure_zcta_shapes() -> Path:
+    url = "https://www2.census.gov/geo/tiger/TIGER2024/ZCTA520/tl_2024_us_zcta520.zip"
+    cache_root = Path(os.getenv("ZCTA_CACHE_DIR", APP_DIR / "data" / "zcta_cache"))
+    extract_dir = cache_root
+    shp_path = extract_dir / "tl_2024_us_zcta520.shp"
+
+    if not shp_path.exists():
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = extract_dir / "tl_2024_us_zcta520.zip"
+        urllib.request.urlretrieve(url, str(zip_path))
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(extract_dir)
+
+    return shp_path
+
+
+def normalize_town(s: str) -> str:
+    return " ".join(s.strip().lower().replace(",", " ").split())
+
+
+def match_town(current_town: str) -> Optional[str]:
+    if not current_town:
+        return None
+    ground_truth_towns = load_moving_from_truth()
+    norm = normalize_town(current_town)
+    for town in ground_truth_towns.keys():
+        if normalize_town(town) == norm:
+            return town
+    for town in ground_truth_towns.keys():
+        if normalize_town(town) in norm or norm in normalize_town(town):
+            return town
+    return None
+
+
+def load_intake() -> Dict[str, Any]:
+    if not INTAKE_PATH.exists():
+        return {}
+    try:
+        return json.loads(INTAKE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float]) -> Dict[str, Any]:
+    ground_truth_towns = load_moving_from_truth()
+    candidate_df = load_moving_to_scores()
+    matched = match_town(str(intake.get("current_town", "")))
+    if not matched:
+        # Fallback: normalize sliders to sum to 1
+        total = sum(sliders.values()) or 1.0
+        w_var = {k: round(v / total, 6) for k, v in sliders.items()}
+        return {
+            "matched_town": None,
+            "w_var": w_var,
+            "gamma": 1.0,
+        }
+
+    gt = ground_truth_towns[matched]
+
+    def to_100(v: Any) -> Optional[float]:
+        try:
+            return float(v) * 10.0
+        except Exception:
+            return None
+
+    user_scores = {
+        "Education": to_100(intake.get("education_rating")),
+        "Healthcare & Fitness": to_100(intake.get("healthcare_fitness_rating")),
+        "Commute/Transit Score": to_100(intake.get("commute_transit_rating")),
+        "Accessibility": to_100(intake.get("accessibility_rating")),
+        "Culture/Entertainment": to_100(intake.get("culture_entertainment_rating")),
+    }
+
+    deltas = {}
+    for k, gt_val in gt.items():
+        u = user_scores.get(k)
+        deltas[k] = None if u is None else float(u) - float(gt_val)
+
+    w_cal = {}
+    for k in FEATURES:
+        delta = deltas.get(k)
+        if delta is None:
+            w_cal[k] = None
+            continue
+        w = sliders[k] * (1 - ALPHA_BASE * (delta / SCALE))
+        if w < 0:
+            w = 0.0
+        w_cal[k] = w
+
+    total = sum(v for v in w_cal.values() if v is not None)
+    if total > 0:
+        for k, v in w_cal.items():
+            if v is None:
+                continue
+            w_cal[k] = v / total
+
+    candidate_rows = candidate_df[FEATURES].dropna()
+    sigma = {}
+    for feature in FEATURES:
+        values = candidate_rows[feature].tolist() if feature in candidate_rows.columns else []
+        if len(values) >= 2:
+            sigma[feature] = statistics.pstdev(values) + SIGMA_EPSILON
+        elif len(values) == 1:
+            sigma[feature] = SIGMA_EPSILON
+        else:
+            sigma[feature] = None
+
+    w_var = {}
+    for feature, w in w_cal.items():
+        s = sigma.get(feature)
+        if w is None or s is None:
+            w_var[feature] = None
+        else:
+            w_var[feature] = w / (s + SIGMA_EPSILON)
+
+    total_var = sum(v for v in w_var.values() if v is not None)
+    if total_var > 0:
+        for k, v in w_var.items():
+            if v is None:
+                continue
+            w_var[k] = v / total_var
+
+    rel_values = []
+    for _, candidate in candidate_rows.iterrows():
+        score = 0.0
+        for feature, w in w_var.items():
+            if w is None:
+                continue
+            s_z = candidate.get(feature)
+            s_home = gt.get(feature)
+            if s_z is None or s_home is None:
+                continue
+            score += w * (float(s_z) - float(s_home))
+        rel_values.append(score)
+
+    if rel_values:
+        med = statistics.median(rel_values)
+        mad = statistics.median([abs(v - med) for v in rel_values])
+    else:
+        mad = None
+
+    if mad is None:
+        gamma = 1.0
+    else:
+        gamma = TARGET_SPREAD / (mad + SIGMA_EPSILON)
+        gamma = max(0.5, min(gamma, 5.0))
+
+    return {
+        "matched_town": matched,
+        "w_var": w_var,
+        "gamma": gamma,
+        "alpha_base": ALPHA_BASE,
+        "scale": SCALE,
+        "sigma_epsilon": SIGMA_EPSILON,
+        "target_spread": TARGET_SPREAD,
+    }
+
+def missing_fields(profile: Dict[str, Any]) -> list[str]:
+    return [f for f in REQUIRED_FIELDS if profile.get(f) in (None, "", [])]
+
+def next_question(missing: list[str]) -> str:
+    if not missing:
+        return ""
+    field = missing[0]
+    questions = {
+        "current_town": "Where do you live now (current town or city)?",
+        "current_address": "What address do you live at right now?",
+        "education_rating": "On a scale of 1 to 10, how would you rate the local schools in your current town?",
+        "healthcare_fitness_rating": "On a scale of 1 to 10, how would you rate healthcare and fitness options in your current town?",
+        "commute_transit_rating": "On a scale of 1 to 10, how would you rate the commute/transit in your current town?",
+        "accessibility_rating": "On a scale of 1 to 10, how would you rate accessibility in your current town?",
+        "culture_entertainment_rating": "On a scale of 1 to 10, how would you rate culture and entertainment in your current town?",
+    }
+    return questions.get(field, "Could you tell me a bit more?")
+
+def call_llm(messages: list[Dict[str, str]]) -> str:
+    provider = get_llm_provider()
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "messages": messages,
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
+    }
+
+    if provider == "openai":
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is not set")
+        url = "https://api.openai.com/v1/chat/completions"
+        headers["Authorization"] = f"Bearer {OPENAI_API_KEY}"
+        payload["model"] = OPENAI_MODEL
+    else:
+        url = f"{LLM_BASE_URL}/chat/completions"
+        if LLM_API_KEY:
+            headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+        payload["model"] = LLM_MODEL
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+def parse_llm_json(text: str) -> Dict[str, Any]:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start:end + 1])
+        return {
+            "assistant_message": text.strip(),
+            "updated_profile": {},
+            "is_complete": False,
+        }
+
+def llm_turn(state: Dict[str, Any]) -> None:
+    profile = state.get("profile", {})
+    messages = state.get("messages", [])
+
+    payload = {
+        "profile": profile,
+        "missing_fields": missing_fields(profile),
+    }
+    messages.append(
+        {
+            "role": "user",
+            "content": "Here is the current profile state:\n" + json.dumps(payload, indent=2),
+        }
+    )
+
+    raw = call_llm(messages)
+    parsed = parse_llm_json(raw)
+
+    messages.append({"role": "assistant", "content": raw})
+
+    updated_profile = parsed.get("updated_profile", {})
+    if isinstance(updated_profile, dict):
+        profile.update(updated_profile)
+
+    state["profile"] = profile
+    state["messages"] = messages
+    is_complete = bool(parsed.get("is_complete", False))
+    parsed_answer = parsed.get("assistant_message", "")
+
+    # Always drive the intake with our fixed questions to avoid drift.
+    missing = missing_fields(profile)
+    if not is_complete and missing:
+        if missing[0] == "current_town":
+            if not state.get("intro_shown", False):
+                assistant_message = (
+                    "Hi there! I’ll ask a few quick questions to personalize the map. "
+                    + next_question(missing)
+                )
+                state["intro_shown"] = True
+            else:
+                assistant_message = next_question(missing)
+        elif missing[0] == "current_address":
+            assistant_message = next_question(missing)
+        else:
+            # Hybrid mode: allow a brief answer, then continue intake.
+            assistant_message = parsed_answer.strip()
+            if not assistant_message:
+                assistant_message = next_question(missing)
+            elif "?" not in assistant_message:
+                assistant_message = f"{assistant_message} {next_question(missing)}"
+    else:
+        assistant_message = parsed_answer
+
+    state["assistant_message"] = assistant_message
+    state["is_complete"] = is_complete
+
+def get_chat_state() -> Dict[str, Any]:
+    chat_id = session.get("chat_id")
+    if chat_id is None:
+        chat_id = os.urandom(8).hex()
+        session["chat_id"] = chat_id
+
+    if "chat_state" not in session:
+        session["chat_state"] = {
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}],
+            "profile": {},
+            "assistant_message": "",
+            "is_complete": False,
+            "chat_log": [],
+            "intro_shown": False,
+        }
+
+    return session["chat_state"]
+
+
+def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None) -> str:
+    df = load_moving_to_scores()
+    shp_path = ensure_zcta_shapes()
+    zip_gdf = load_zip_shapes(str(shp_path))
+
+    # Massachusetts-only scope
+    zip_gdf = zip_gdf[zip_gdf["Zip"].astype(str).str.startswith("0")]
+
+    missing_features = [c for c in FEATURES if c not in df.columns]
+    if missing_features:
+        raise ValueError(f"Missing required feature columns in moving_to.csv: {', '.join(missing_features)}")
+
+    # Compute personalized weights
+    intake = intake or {}
+    weights_info = compute_weights_from_intake(intake, sliders)
+    w_var = weights_info["w_var"]
+    gamma = weights_info["gamma"]
+
+    columns = FEATURES
+    weights = {k: w_var[k] for k in columns if w_var.get(k) is not None}
+    w_sum = sum(weights.values()) if weights else 0.0
+    if w_sum <= 0:
+        # Fallback to equal weights if calibration zeroed everything.
+        weights = {k: 1.0 for k in columns}
+
+    df["Composite Score"] = compute_composite_score(df, columns, weights)
+
+    # Apply gamma to map scale
+    if gamma is not None:
+        df["Composite Score (Calibrated)"] = df["Composite Score"] * float(gamma)
+        value_col = "Composite Score (Calibrated)"
+    else:
+        value_col = "Composite Score"
+
+    featured_homes = []
+    if intake and intake.get("synthetic_home"):
+        featured_homes = find_best_home_matches(intake.get("synthetic_home"))
+
+    df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+    zip_gdf["Zip"] = zip_gdf["Zip"].astype(str).str.zfill(5)
+
+    merged = zip_gdf.merge(df, on="Zip", how="inner")
+
+    minx, miny, maxx, maxy = merged.total_bounds
+    center = ((miny + maxy) / 2, (minx + maxx) / 2)
+
+    m = create_zip_heatmap(
+        merged,
+        value_col,
+        center=center,
+        zoom=11,
+        featured_homes=featured_homes,
+    )
+    return m.get_root().render()
+
+
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET", "dev")
+
+
+TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <title>ZIP Heatmap (Personalized)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <style>
+    :root {
+      --panel-width: 340px;
+      --border: #ddd;
+      --text: #1f2937;
+      --muted: #555;
+      --panel-bg: #ffffff;
+      --chat-bg: #fafafa;
+      --accent-bg: #eef3ff;
+      --accent-border: #cbd8ff;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 0; color: var(--text); background: #f7f7f7; }
+    .layout { display: grid; grid-template-columns: minmax(300px, var(--panel-width)) 1fr; min-height: 100vh; }
+    .panel { padding: 16px; border-right: 1px solid var(--border); overflow: auto; background: var(--panel-bg); }
+    .panel h2 { margin-top: 0; }
+    .chat { border: 1px solid var(--border); padding: 10px; height: 220px; overflow: auto; background: var(--chat-bg); border-radius: 12px; }
+    .chat p { margin: 6px 0; }
+    .chat .user { color: #333; }
+    .chat .assistant { color: #0b3d91; }
+    .chat-form textarea {
+      width: 100%;
+      min-height: 88px;
+      padding: 12px;
+      font-size: 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      resize: vertical;
+    }
+    .pill {
+      display: inline-block;
+      padding: 6px 10px;
+      background: var(--accent-bg);
+      border: 1px solid var(--accent-border);
+      border-radius: 999px;
+      margin-right: 6px;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+    .slider { margin-bottom: 18px; }
+    .slider label { display: block; font-weight: bold; margin-bottom: 8px; font-size: 15px; }
+    .slider input { width: 100%; min-height: 40px; }
+    .map {
+      min-height: 100vh;
+      background: #e5e7eb;
+    }
+    .map iframe {
+      display: block;
+      border: 0;
+      width: 100%;
+      height: 100%;
+      min-height: 100vh;
+    }
+    .help { font-size: 12px; color: var(--muted); }
+    button {
+      min-height: 44px;
+      padding: 10px 14px;
+      font-size: 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+    }
+    hr { border: 0; border-top: 1px solid var(--border); margin: 20px 0; }
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
+      }
+      .panel {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+        max-height: none;
+      }
+      .map {
+        min-height: 60vh;
+      }
+      .map iframe {
+        min-height: 60vh;
+      }
+    }
+    @media (max-width: 640px) {
+      .panel {
+        padding: 14px;
+      }
+      .chat {
+        height: 180px;
+      }
+      .map {
+        min-height: 52vh;
+      }
+      .map iframe {
+        min-height: 52vh;
+      }
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+  <script>
+    function updateValue(id, val) {
+      document.getElementById(id).innerText = Number(val).toFixed(2);
+    }
+    function submitSliders() {
+      const form = document.getElementById("slider-form");
+      if (form) form.submit();
+    }
+  </script>
+</head>
+<body>
+  <div class="layout">
+    <div class="panel">
+      <h2>Chat Intake</h2>
+      <div class="chat">
+        {% for role, text in chat_log %}
+          <p class="{{ role }}"><strong>{{ role.title() }}:</strong> {{ text }}</p>
+        {% endfor %}
+      </div>
+      {% if assistant_message %}
+        <p class="assistant"><strong>Assistant:</strong> {{ assistant_message }}</p>
+      {% endif %}
+      <form class="chat-form" method="POST" action="/chat">
+        <textarea name="chat_message" placeholder="Type your response..."></textarea>
+        <button type="submit">Send</button>
+      </form>
+      {% if is_complete %}
+        <p class="help">Chat complete. Sliders now apply personalized calibration.</p>
+        <div>
+          {% if personalization.matched_town %}
+            <span class="pill">Matched: {{ personalization.matched_town }}</span>
+          {% endif %}
+          <span class="pill">Gamma: {{ (personalization.gamma | default(1.0)) | round(3) }}</span>
+          <span class="pill">Alpha: {{ (personalization.alpha_base | default(0.3)) | round(3) }}</span>
+          <span class="pill">Scale: {{ (personalization.scale | default(100.0)) | round(3) }}</span>
+          <span class="pill">Sigma ε: {{ (personalization.sigma_epsilon | default(0.000001)) | round(6) }}</span>
+          <span class="pill">Target: {{ (personalization.target_spread | default(10.0)) | round(3) }}</span>
+        </div>
+        {% if personalization.synthetic_home %}
+          <p class="help">
+            Synthetic home: {{ personalization.synthetic_home.town | default('N/A') }}
+            {% if personalization.synthetic_home.zip %} {{ personalization.synthetic_home.zip }}{% endif %}
+            {% if personalization.synthetic_home.bedrooms %} | {{ personalization.synthetic_home.bedrooms }} bd{% endif %}
+            {% if personalization.synthetic_home.bathrooms %} | {{ personalization.synthetic_home.bathrooms }} ba{% endif %}
+            {% if personalization.synthetic_home.interior_sqft %} | {{ personalization.synthetic_home.interior_sqft | round(0) }} sqft{% endif %}
+          </p>
+        {% endif %}
+        {% if personalization.best_home_matches %}
+          <p class="help">Top home matches are shown on the map as stars:</p>
+          {% for home in personalization.best_home_matches %}
+            <p class="help">
+              {{ loop.index }}. {{ home.address }}{% if home.city %}, {{ home.city }}{% endif %}
+              {% if home.price %} | ${{ "{:,.0f}".format(home.price) }}{% endif %}
+              {% if home.match_score is not none %} | score {{ "%.3f"|format(home.match_score) }}{% endif %}
+            </p>
+          {% endfor %}
+        {% endif %}
+      {% else %}
+        <p class="help">Answer the question above to continue.</p>
+      {% endif %}
+
+      <hr>
+      <h2>Weights</h2>
+      <form id="slider-form" method="POST">
+        {% for f in features %}
+        <div class="slider">
+          <label>{{f}}: <span id="v{{loop.index}}">{{sliders[f]|round(2)}}</span></label>
+          <input type="range" min="0" max="1" step="0.01" name="{{feature_fields[f]}}" value="{{sliders[f]}}" oninput="updateValue('v{{loop.index}}', this.value)" onchange="submitSliders()">
+        </div>
+        {% endfor %}
+        <button type="submit">Update Map</button>
+        <p class="help">Scope: Massachusetts (ZIPs starting with 0)</p>
+      </form>
+      <form method="POST" action="/reset">
+        <button type="submit">Reset Chat</button>
+      </form>
+      {% if map_error %}
+        <p class="help">Map error: {{ map_error }}</p>
+      {% endif %}
+    </div>
+    <div class="map">
+      <iframe src="/map?ts={{ map_ts }}"></iframe>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    reset_ts = request.args.get("reset_ts")
+    sliders = {f: 0.5 for f in FEATURES}
+    if request.method == "POST":
+        for f in FEATURES:
+            try:
+                field = FEATURE_FIELDS[f]
+                sliders[f] = float(request.form.get(field, sliders[f]))
+            except Exception:
+                sliders[f] = sliders[f]
+
+    state = get_chat_state()
+    if not state["assistant_message"]:
+        try:
+            llm_turn(state)
+        except Exception as e:
+            state["assistant_message"] = f"LLM error: {e}"
+
+    map_error = None
+    session["sliders"] = sliders
+    # Map is served via /map to avoid srcdoc escaping issues.
+    session["chat_state"] = state
+    try:
+        return render_template_string(
+            TEMPLATE,
+            features=FEATURES,
+            feature_fields=FEATURE_FIELDS,
+            sliders=sliders,
+            chat_log=state.get("chat_log", []),
+            assistant_message=state.get("assistant_message", ""),
+            is_complete=state.get("is_complete", False),
+            personalization=state.get("personalization", {}),
+            map_error=map_error,
+            map_ts=int(reset_ts) if reset_ts and reset_ts.isdigit() else int(time.time() * 1000),
+        )
+    except Exception as e:
+        return f"<pre>Template render failed: {e}</pre>"
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    state = get_chat_state()
+    msg = request.form.get("chat_message", "").strip()
+    if msg:
+        state.setdefault("chat_log", []).append(("user", msg))
+        state["messages"].append({"role": "user", "content": msg})
+        if not state.get("profile"):
+            state["profile"] = {}
+        # Drive the first two free-text answers into town/address slots unless the user is asking a question.
+        looks_like_question = "?" in msg or msg.lower().startswith(("what", "why", "how", "can you", "could you", "explain"))
+        if not looks_like_question and not state["profile"].get("current_town"):
+            state["profile"]["current_town"] = msg
+        elif not looks_like_question and not state["profile"].get("current_address"):
+            state["profile"]["current_address"] = msg
+
+        try:
+            llm_turn(state)
+            if state.get("assistant_message"):
+                state.setdefault("chat_log", []).append(("assistant", state["assistant_message"]))
+        except Exception as e:
+            state["assistant_message"] = f"LLM error: {e}"
+
+    if state.get("is_complete"):
+        profile = state.get("profile", {})
+        try:
+            synthetic_home = select_synthetic_home(
+                str(profile.get("current_address", "")),
+                str(profile.get("current_town", "")),
+            )
+        except Exception as e:
+            synthetic_home = {"error": str(e)}
+        if synthetic_home is not None:
+            profile["synthetic_home"] = synthetic_home
+        state["profile"] = profile
+        if PERSIST_INTAKE_TO_DISK:
+            INTAKE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            INTAKE_PATH.write_text(json.dumps(profile, indent=2))
+        weights_info = compute_weights_from_intake(profile, {f: 1.0 for f in FEATURES})
+        if synthetic_home is not None:
+            weights_info["synthetic_home"] = synthetic_home
+            try:
+                weights_info["best_home_matches"] = find_best_home_matches(synthetic_home)
+            except Exception as e:
+                weights_info["best_home_matches_error"] = str(e)
+        state["personalization"] = weights_info
+
+    session["chat_state"] = state
+    return redirect(url_for("index"))
+
+
+@app.route("/reset", methods=["POST"])
+def reset():
+    session.clear()
+    if PERSIST_INTAKE_TO_DISK:
+        try:
+            if INTAKE_PATH.exists():
+                INTAKE_PATH.unlink()
+        except Exception:
+            pass
+    return redirect(url_for("index", reset_ts=int(time.time() * 1000000)))
+
+
+@app.route("/map", methods=["GET"])
+def map_view():
+    sliders = session.get("sliders") or {f: 0.5 for f in FEATURES}
+    chat_state = session.get("chat_state") or {}
+    intake = chat_state.get("profile") if chat_state.get("is_complete") else None
+    try:
+        map_html = build_map(sliders, intake=intake)
+        resp = Response(map_html, mimetype="text/html")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception as e:
+        html = f"<p style='padding:12px;'>Map failed to render: {e}</p>"
+        resp = Response(html, mimetype="text/html")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "5000"))
+    debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host="0.0.0.0", port=port, debug=debug)

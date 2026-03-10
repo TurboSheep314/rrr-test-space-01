@@ -7,8 +7,8 @@ import math
 
 
 
-def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
-    m = folium.Map(location=center, zoom_start=zoom, tiles="cartodbpositron")
+def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_homes=None):
+    m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
 
     # colormap = cm.LinearColormap(
     # colors=["blue", "cyan", "yellow", "orange", "red"],
@@ -70,11 +70,36 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         gdf,
         style_function=lambda feature: {"fillOpacity": 0},
         tooltip=folium.GeoJsonTooltip(
-            fields=["Zip", "Composite Score"],
-            aliases=["ZIP Code", "Composite Score"],
+            fields=["Zip", value_col],
+            aliases=["ZIP Code", value_col],
             localize=True
         ),
     ).add_to(m)
+
+    if featured_homes:
+        for home in featured_homes:
+            lat = home.get("latitude")
+            lon = home.get("longitude")
+            if lat is None or lon is None:
+                continue
+
+            popup_lines = [
+                f"<strong>{home.get('address', 'Home Match')}</strong>",
+                f"{home.get('city', '')} {home.get('zip', '')}".strip(),
+                f"Price: ${home.get('price', 0):,.0f}" if home.get("price") is not None else "",
+                f"{home.get('beds', '?')} bd | {home.get('baths', '?')} ba",
+                f"{home.get('square_feet', 0):,.0f} sqft" if home.get("square_feet") is not None else "",
+            ]
+            if home.get("match_score") is not None:
+                popup_lines.append(f"Match score: {home['match_score']:.3f}")
+
+            popup_html = "<br>".join([line for line in popup_lines if line])
+            folium.Marker(
+                location=[lat, lon],
+                tooltip=home.get("address", "Home Match"),
+                popup=folium.Popup(popup_html, max_width=280),
+                icon=folium.Icon(color="red", icon="star", prefix="fa"),
+            ).add_to(m)
 
     # LEGEND (simple HTML box)
     template = """
@@ -89,11 +114,12 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9):
         font-size: 14px;
         border: 1px solid #777;
     ">
-        <strong>Composite Score</strong><br>
+        <strong>__VALUE_COL__</strong><br>
         Shaded = Higher Score
     </div>
     {% endmacro %}
     """
+    template = template.replace("__VALUE_COL__", value_col)
     legend = MacroElement()
     legend._template = Template(template)
     m.get_root().add_child(legend)

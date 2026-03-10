@@ -1,0 +1,32 @@
+{
+  "current_town": "Memphis",
+  "education_rating": 4,
+  "healthcare_fitness_rating": 2,
+  "commute_transit_rating": 8,
+  "accessibility_rating": 4,
+  "culture_entertainment_rating": 10,
+  "personalization": {
+    "matched_town": "Memphis",
+    "ground_truth": {
+      "Education": 43,
+      "Healthcare & Fitness": 24,
+      "Commute/Transit Score": 66,
+      "Accessibility": 37,
+      "Culture/Entertainment": 49
+    },
+    "user_scores_0_100": {
+      "Education": 40.0,
+      "Healthcare & Fitness": 20.0,
+      "Commute/Transit Score": 80.0,
+      "Accessibility": 40.0,
+      "Culture/Entertainment": 100.0
+    },
+    "deltas_user_minus_truth": {
+      "Education": -3.0,
+      "Healthcare & Fitness": -4.0,
+      "Commute/Transit Score": 14.0,
+      "Accessibility": 3.0,
+      "Culture/Entertainment": 51.0
+    }
+  }
+}

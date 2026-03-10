@@ -20,3 +20,13 @@ SHEET_ID = st.sidebar.text_input(
 )
 
 df = load_scores(SHEET_ID)
+
+
+
+Education
+Healthcare + Fitness
+Commute/Transit score
+Accessibility
+Culture/Entertainment 
+
+All scored out of 100- so total score could be 500

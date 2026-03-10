@@ -1,6 +1,8 @@
 streamlit-folium
 streamlit
 pandas
+flask
+gunicorn
 numpy
 geopandas
 pyogrio
@@ -8,3 +10,4 @@ shapely
 pyproj
 folium
 branca
+openpyxl

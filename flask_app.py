@@ -25,8 +25,6 @@ CONFIG_PATH = APP_DIR / "sheets.json"
 INTAKE_PATH = APP_DIR / "out" / "intake_profile.json"
 MOVING_FROM_PATH = APP_DIR / "data" / "moving_from.csv"
 MOVING_TO_PATH = APP_DIR / "data" / "moving_to.csv"
-SYNTHETIC_HOMES_PATH = APP_DIR / "data" / "processed" / "synthetic_homes_from.csv"
-HOME_SALES_PATH = APP_DIR / "data" / "Home Sales Data - previous year.csv"
 PREBUILT_ZCTA_GEOJSON_PATH = APP_DIR / "data" / "processed" / "ma_zcta_simplified.geojson"
 
 ALPHA_BASE = 0.3
@@ -81,7 +79,6 @@ Rules:
 
 Required fields:
 - current_town (string)
-- current_address (string)
 - education_rating (integer, 1-10)
 - healthcare_fitness_rating (integer, 1-10)
 - commute_transit_rating (integer, 1-10)
@@ -91,7 +88,6 @@ Required fields:
 
 REQUIRED_FIELDS = [
     "current_town",
-    "current_address",
     "education_rating",
     "healthcare_fitness_rating",
     "commute_transit_rating",
@@ -426,6 +422,47 @@ def load_base_map_geometry() -> tuple[Any, tuple[float, float]]:
     return base, center
 
 
+@lru_cache(maxsize=1)
+def load_zip_touching_map() -> Dict[str, list[str]]:
+    base_gdf, _ = load_base_map_geometry()
+    zip_map: Dict[str, list[str]] = {}
+    if base_gdf.empty:
+        return zip_map
+
+    geometries = base_gdf.set_index("Zip")["geometry"]
+    buffered = {zip_code: geom.buffer(1e-6) for zip_code, geom in geometries.items()}
+    for zip_code, geom in geometries.items():
+        neighbors = [zip_code]
+        for other_zip, other_geom in geometries.items():
+            if other_zip == zip_code:
+                continue
+            if geom.touches(other_geom) or buffered[zip_code].intersects(buffered[other_zip]):
+                neighbors.append(other_zip)
+        zip_map[zip_code] = sorted(set(neighbors))
+    return zip_map
+
+
+def expand_selected_zips(seed_zip: str) -> list[str]:
+    if not seed_zip:
+        return []
+    return load_zip_touching_map().get(str(seed_zip).zfill(5), [])
+
+
+def expand_multiple_selected_zips(seed_zips: list[str]) -> list[str]:
+    expanded: set[str] = set()
+    for seed_zip in seed_zips:
+        expanded.update(expand_selected_zips(seed_zip))
+    return sorted(expanded)
+
+
+def filter_gdf_to_selected_zips(gdf, selected_zips: Optional[list[str]]):
+    if not selected_zips:
+        return gdf
+    normalized = {str(zip_code).zfill(5) for zip_code in selected_zips}
+    filtered = gdf[gdf["Zip"].astype(str).str.zfill(5).isin(normalized)].copy()
+    return filtered if not filtered.empty else gdf
+
+
 def normalize_town(s: str) -> str:
     return " ".join(s.strip().lower().replace(",", " ").split())
 
@@ -542,9 +579,13 @@ def explain_weight_change(
     )
 
 
-def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float]) -> Dict[str, Any]:
+def compute_weights_from_intake(
+    intake: Dict[str, Any],
+    sliders: Dict[str, float],
+    candidate_df_override: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
     ground_truth_towns = load_moving_from_truth()
-    candidate_df = load_moving_to_scores()
+    candidate_df = candidate_df_override.copy() if candidate_df_override is not None else load_moving_to_scores()
     matched = match_town(str(intake.get("current_town", "")))
     if not matched:
         # Fallback: normalize sliders to sum to 1
@@ -570,6 +611,7 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
             "w_var": w_var,
             "gamma": 1.0,
             "trace_rows": trace_rows,
+            "candidate_zip_count": int(len(candidate_df)),
         }
 
     gt = ground_truth_towns[matched]
@@ -716,6 +758,7 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
         "sigma_epsilon": SIGMA_EPSILON,
         "target_spread": TARGET_SPREAD,
         "trace_rows": trace_rows,
+        "candidate_zip_count": int(len(candidate_df)),
     }
 
 def missing_fields(profile: Dict[str, Any]) -> list[str]:
@@ -854,7 +897,6 @@ def get_chat_state() -> Dict[str, Any]:
 def parse_intake_form(form, existing_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     profile = dict(existing_profile or {})
     profile["current_town"] = form.get("current_town", "").strip()
-    profile["current_address"] = form.get("current_address", "").strip()
 
     for field_name, _, _ in RATING_FIELDS:
         raw = form.get(field_name, "").strip()
@@ -873,10 +915,16 @@ def parse_intake_form(form, existing_profile: Optional[Dict[str, Any]] = None) -
 def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None) -> str:
     base_gdf, center = load_base_map_geometry()
     merged = base_gdf.copy()
+    selected_zips = session.get("selected_zips") or []
+    candidate_scope = filter_gdf_to_selected_zips(base_gdf, selected_zips)
 
     # Compute personalized weights
     intake = intake or {}
-    weights_info = compute_weights_from_intake(intake, sliders)
+    weights_info = compute_weights_from_intake(
+        intake,
+        sliders,
+        candidate_df_override=candidate_scope[FEATURES] if not candidate_scope.empty else base_gdf[FEATURES],
+    )
     w_var = weights_info["w_var"]
     gamma = weights_info["gamma"]
 
@@ -896,16 +944,13 @@ def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None
     else:
         value_col = "Composite Score"
 
-    featured_homes = []
-    if intake and intake.get("synthetic_home"):
-        featured_homes = find_best_home_matches(intake.get("synthetic_home"))
-
     m = create_zip_heatmap(
         merged,
         value_col,
         center=center,
         zoom=11,
-        featured_homes=featured_homes,
+        featured_homes=None,
+        selected_zips=selected_zips,
     )
     return m.get_root().render()
 
@@ -1094,6 +1139,17 @@ TEMPLATE = """
       const form = document.getElementById("slider-form");
       if (form) form.submit();
     }
+    window.addEventListener("message", (event) => {
+      if (!event.data) return;
+      if (event.data.type === "mapZipSelected" && event.data.zip) {
+        const field = document.getElementById("selected-zip-input");
+        const form = document.getElementById("select-zip-form");
+        if (field && form) {
+          field.value = event.data.zip;
+          form.submit();
+        }
+      }
+    });
   </script>
 </head>
 <body>
@@ -1111,10 +1167,6 @@ TEMPLATE = """
                 <option value="{{ town }}" {% if profile.current_town | default('') == town %}selected{% endif %}>{{ town }}</option>
               {% endfor %}
             </select>
-          </div>
-          <div class="field">
-            <label for="current_address">Current address</label>
-            <input id="current_address" type="text" name="current_address" value="{{ profile.current_address | default('') }}" placeholder="e.g. 123 Main St, Memphis, TN">
           </div>
           {% for field_name, feature_name, question in rating_fields %}
             <div class="field">
@@ -1150,25 +1202,6 @@ TEMPLATE = """
           <span class="pill">Sigma ε: {{ (personalization.sigma_epsilon | default(0.000001)) | round(6) }}</span>
           <span class="pill">Target: {{ (personalization.target_spread | default(10.0)) | round(3) }}</span>
         </div>
-        {% if personalization.synthetic_home %}
-          <p class="help">
-            Synthetic home: {{ personalization.synthetic_home.town | default('N/A') }}
-            {% if personalization.synthetic_home.zip %} {{ personalization.synthetic_home.zip }}{% endif %}
-            {% if personalization.synthetic_home.bedrooms %} | {{ personalization.synthetic_home.bedrooms }} bd{% endif %}
-            {% if personalization.synthetic_home.bathrooms %} | {{ personalization.synthetic_home.bathrooms }} ba{% endif %}
-            {% if personalization.synthetic_home.interior_sqft %} | {{ personalization.synthetic_home.interior_sqft | round(0) }} sqft{% endif %}
-          </p>
-        {% endif %}
-        {% if personalization.best_home_matches %}
-          <p class="help">Top home matches are shown on the map as stars:</p>
-          {% for home in personalization.best_home_matches %}
-            <p class="help">
-              {{ loop.index }}. {{ home.address }}{% if home.city %}, {{ home.city }}{% endif %}
-              {% if home.price %} | ${{ "{:,.0f}".format(home.price) }}{% endif %}
-              {% if home.match_score is not none %} | score {{ "%.3f"|format(home.match_score) }}{% endif %}
-            </p>
-          {% endfor %}
-        {% endif %}
         {% if personalization.trace_rows %}
           <details>
             <summary>Why these weights?</summary>
@@ -1231,6 +1264,29 @@ TEMPLATE = """
       <form method="POST" action="/reset">
         <button type="submit">Reset Form</button>
       </form>
+      <hr>
+      <h2>ZIP Selection</h2>
+      <p class="help">
+        Click a ZIP on the map to select it. The app will automatically include that ZIP and every ZIP that touches it.
+      </p>
+      {% if selected_seed_zips %}
+        <p class="help">
+          Selected ZIPs: {{ selected_seed_zips|join(", ") }}<br>
+          Included ZIP count: {{ personalization.candidate_zip_count | default(selected_zips|length) }}
+        </p>
+        <p class="help">
+          Included ZIPs: {{ selected_zips|join(", ") }}
+        </p>
+      {% else %}
+        <p class="help">No ZIPs selected yet. Click one on the map to start a local comparison set.</p>
+      {% endif %}
+      <form id="select-zip-form" method="POST" action="/select-zip">
+        <input id="selected-zip-input" type="hidden" name="zip">
+        <button type="button" disabled>Select ZIPs</button>
+      </form>
+      <form method="POST" action="/clear-selection">
+        <button type="submit">Clear Selected ZIPs</button>
+      </form>
       {% if map_error %}
         <p class="help">Map error: {{ map_error }}</p>
       {% endif %}
@@ -1260,13 +1316,12 @@ def index():
 
     if state.get("is_complete"):
         profile = state.get("profile", {})
-        weights_info = compute_weights_from_intake(profile, sliders)
-        if profile.get("synthetic_home"):
-            weights_info["synthetic_home"] = profile.get("synthetic_home")
-            try:
-                weights_info["best_home_matches"] = find_best_home_matches(profile.get("synthetic_home"))
-            except Exception as e:
-                weights_info["best_home_matches_error"] = str(e)
+        selected_scope = filter_gdf_to_selected_zips(load_base_map_geometry()[0], session.get("selected_zips"))
+        weights_info = compute_weights_from_intake(
+            profile,
+            sliders,
+            candidate_df_override=selected_scope[FEATURES] if not selected_scope.empty else load_base_map_geometry()[0][FEATURES],
+        )
         state["personalization"] = weights_info
 
     map_error = None
@@ -1285,6 +1340,8 @@ def index():
             profile=state.get("profile", {}),
             is_complete=state.get("is_complete", False),
             personalization=state.get("personalization", {}),
+            selected_seed_zips=session.get("selected_seed_zips") or [],
+            selected_zips=session.get("selected_zips") or [],
             map_error=map_error,
             map_ts=int(reset_ts) if reset_ts and reset_ts.isdigit() else int(time.time() * 1000),
         )
@@ -1300,32 +1357,44 @@ def intake():
     state["is_complete"] = len(missing_fields(profile)) == 0
 
     if state.get("is_complete"):
-        try:
-            synthetic_home = select_synthetic_home(
-                str(profile.get("current_address", "")),
-                str(profile.get("current_town", "")),
-            )
-        except Exception as e:
-            synthetic_home = {"error": str(e)}
-        if synthetic_home is not None:
-            profile["synthetic_home"] = synthetic_home
         state["profile"] = profile
         if PERSIST_INTAKE_TO_DISK:
             INTAKE_PATH.parent.mkdir(parents=True, exist_ok=True)
             INTAKE_PATH.write_text(json.dumps(profile, indent=2))
-        weights_info = compute_weights_from_intake(profile, {f: 1.0 for f in FEATURES})
-        if synthetic_home is not None:
-            weights_info["synthetic_home"] = synthetic_home
-            try:
-                weights_info["best_home_matches"] = find_best_home_matches(synthetic_home)
-            except Exception as e:
-                weights_info["best_home_matches_error"] = str(e)
+        selected_scope = filter_gdf_to_selected_zips(load_base_map_geometry()[0], session.get("selected_zips"))
+        weights_info = compute_weights_from_intake(
+            profile,
+            {f: 1.0 for f in FEATURES},
+            candidate_df_override=selected_scope[FEATURES] if not selected_scope.empty else load_base_map_geometry()[0][FEATURES],
+        )
         state["personalization"] = weights_info
     else:
         state["personalization"] = {}
 
     session["chat_state"] = state
     return redirect(url_for("index"))
+
+
+@app.route("/select-zip", methods=["POST"])
+def select_zip():
+    zip_code = str(request.form.get("zip", "")).strip()
+    zip_code = str(zip_code).zfill(5) if zip_code else ""
+    existing_seed_zips = [str(z).zfill(5) for z in (session.get("selected_seed_zips") or [])]
+    if zip_code and zip_code not in existing_seed_zips:
+        existing_seed_zips.append(zip_code)
+
+    selected = expand_multiple_selected_zips(existing_seed_zips)
+    if selected:
+        session["selected_seed_zips"] = existing_seed_zips
+        session["selected_zips"] = selected
+    return redirect(url_for("index", reset_ts=int(time.time() * 1000000)))
+
+
+@app.route("/clear-selection", methods=["POST"])
+def clear_selection():
+    session.pop("selected_seed_zips", None)
+    session.pop("selected_zips", None)
+    return redirect(url_for("index", reset_ts=int(time.time() * 1000000)))
 
 
 @app.route("/reset", methods=["POST"])

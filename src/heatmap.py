@@ -1,14 +1,12 @@
 import folium
 from folium.plugins import HeatMap
 from branca.element import Template, MacroElement
-import branca.colormap as cm
 import math
 
 
-
-
-def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_homes=None):
+def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_homes=None, selected_zips=None):
     m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
+    selected_zips = {str(zip_code).zfill(5) for zip_code in (selected_zips or [])}
 
     folium.Choropleth(
         geo_data=gdf,
@@ -49,8 +47,8 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
                 continue
         except Exception:
             continue
-    
-    heat_data.append([lat, lon, float(val)])
+
+        heat_data.append([lat, lon, float(val)])
     HeatMap(
         heat_data,
         radius=0.25,
@@ -68,6 +66,28 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
             localize=True
         ),
     ).add_to(m)
+
+    click_layer = folium.GeoJson(
+        gdf,
+        name="zip-click-layer",
+        style_function=lambda feature: {
+            "fillColor": "#9ca3af" if selected_zips and feature["properties"]["Zip"] not in selected_zips else "transparent",
+            "color": "#2563eb" if feature["properties"]["Zip"] in selected_zips else "#00000000",
+            "weight": 3 if feature["properties"]["Zip"] in selected_zips else 1,
+            "fillOpacity": 0.45 if selected_zips and feature["properties"]["Zip"] not in selected_zips else 0.0,
+        },
+        highlight_function=lambda feature: {
+            "weight": 3,
+            "color": "#2563eb",
+            "fillOpacity": 0.08,
+        },
+        tooltip=folium.GeoJsonTooltip(
+            fields=["Zip", value_col],
+            aliases=["ZIP Code", value_col],
+            localize=True
+        ),
+    )
+    click_layer.add_to(m)
 
     if featured_homes:
         for home in featured_homes:
@@ -116,5 +136,29 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
     legend = MacroElement()
     legend._template = Template(template)
     m.get_root().add_child(legend)
+
+    map_name = m.get_name()
+    click_template = """
+    {% macro script(this, kwargs) %}
+    __CLICK_LAYER__.eachLayer(function(layer) {
+        layer.on("click", function(e) {
+            var zipCode = null;
+            if (layer.feature && layer.feature.properties) {
+                zipCode = layer.feature.properties.Zip;
+            }
+            if (!zipCode || !window.parent) return;
+            window.parent.postMessage({
+                type: "mapZipSelected",
+                zip: zipCode
+            }, "*");
+        });
+    });
+    {% endmacro %}
+    """
+    click_template = click_template.replace("__MAP_NAME__", map_name)
+    click_template = click_template.replace("__CLICK_LAYER__", click_layer.get_name())
+    click_bridge = MacroElement()
+    click_bridge._template = Template(click_template)
+    m.get_root().add_child(click_bridge)
 
     return m

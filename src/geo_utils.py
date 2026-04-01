@@ -11,7 +11,7 @@ def load_zip_shapes(path: str):
     gdf = gpd.read_file(path)
 
     # Auto-detect ZIP/ZCTA field across Census years/products
-    for candidate in ["ZCTA5CE20", "ZCTA5CE10", "GEOID20", "GEOID"]:
+    for candidate in ["Zip", "ZCTA5CE20", "ZCTA5CE10", "GEOID20", "GEOID"]:
         if candidate in gdf.columns:
             zip_col = candidate
             break

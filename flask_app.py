@@ -27,6 +27,7 @@ MOVING_FROM_PATH = APP_DIR / "data" / "moving_from.csv"
 MOVING_TO_PATH = APP_DIR / "data" / "moving_to.csv"
 SYNTHETIC_HOMES_PATH = APP_DIR / "data" / "processed" / "synthetic_homes_from.csv"
 HOME_SALES_PATH = APP_DIR / "data" / "Home Sales Data - previous year.csv"
+PREBUILT_ZCTA_GEOJSON_PATH = APP_DIR / "data" / "processed" / "ma_zcta_simplified.geojson"
 
 ALPHA_BASE = 0.3
 SCALE = 100.0
@@ -356,6 +357,45 @@ def ensure_zcta_shapes() -> Path:
     return shp_path
 
 
+def ensure_zip_geometry() -> Path:
+    prebuilt_path = Path(os.getenv("PREBUILT_ZCTA_GEOJSON", PREBUILT_ZCTA_GEOJSON_PATH))
+    if prebuilt_path.exists():
+        return prebuilt_path
+    return ensure_zcta_shapes()
+
+
+@lru_cache(maxsize=2)
+def load_cached_zip_geometry(path_str: str):
+    return load_zip_shapes(path_str)
+
+
+@lru_cache(maxsize=1)
+def load_base_map_geometry() -> tuple[Any, tuple[float, float]]:
+    geometry_path = ensure_zip_geometry()
+    zip_gdf = load_cached_zip_geometry(str(geometry_path)).copy()
+    df = load_moving_to_scores().copy()
+
+    missing_features = [c for c in FEATURES if c not in df.columns]
+    if missing_features:
+        raise ValueError(f"Missing required feature columns in moving_to.csv: {', '.join(missing_features)}")
+
+    df["Zip"] = df["Zip"].astype(str).str.zfill(5)
+    zip_gdf["Zip"] = zip_gdf["Zip"].astype(str).str.zfill(5)
+
+    base = zip_gdf.merge(df, on="Zip", how="inner")
+    if base.empty:
+        raise ValueError(
+            f"No overlapping ZIP geometries found between {geometry_path.name} and moving_to.csv"
+        )
+
+    keep_cols = ["Zip", "geometry", *FEATURES]
+    base = base[[col for col in keep_cols if col in base.columns]].copy()
+
+    minx, miny, maxx, maxy = base.total_bounds
+    center = ((miny + maxy) / 2, (minx + maxx) / 2)
+    return base, center
+
+
 def normalize_town(s: str) -> str:
     return " ".join(s.strip().lower().replace(",", " ").split())
 
@@ -383,6 +423,95 @@ def load_intake() -> Dict[str, Any]:
         return {}
 
 
+def bucket_slider(value: float) -> str:
+    if value < 0.20:
+        return "xlow"
+    if value < 0.40:
+        return "low"
+    if value < 0.60:
+        return "medium"
+    if value < 0.80:
+        return "high"
+    return "xhigh"
+
+
+def bucket_delta(value: float) -> str:
+    if value <= -15:
+        return "xlow"
+    if value <= -5:
+        return "low"
+    if value < 5:
+        return "medium"
+    if value < 15:
+        return "high"
+    return "xhigh"
+
+
+def bucket_relative_weight(value: float, values: list[float]) -> str:
+    if not values:
+        return "medium"
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return "medium"
+    q1 = np.quantile(ordered, 0.2)
+    q2 = np.quantile(ordered, 0.4)
+    q3 = np.quantile(ordered, 0.6)
+    q4 = np.quantile(ordered, 0.8)
+    if value <= q1:
+        return "xlow"
+    if value <= q2:
+        return "low"
+    if value <= q3:
+        return "medium"
+    if value <= q4:
+        return "high"
+    return "xhigh"
+
+
+def explain_weight_change(
+    feature: str,
+    slider: Optional[float],
+    delta: Optional[float],
+    final_weight: Optional[float],
+    all_final_weights: list[float],
+) -> str:
+    if slider is None or delta is None or final_weight is None:
+        return "We used your slider value directly because there was not enough hometown data to adjust this feature."
+
+    slider_bucket = bucket_slider(float(slider))
+    delta_bucket = bucket_delta(float(delta))
+    final_bucket = bucket_relative_weight(float(final_weight), all_final_weights)
+
+    slider_text = {
+        "xlow": "very low importance",
+        "low": "low importance",
+        "medium": "medium importance",
+        "high": "high importance",
+        "xhigh": "very high importance",
+    }[slider_bucket]
+
+    delta_text = {
+        "xlow": "much lower than the stored hometown score",
+        "low": "a bit lower than the stored hometown score",
+        "medium": "about the same as the stored hometown score",
+        "high": "a bit higher than the stored hometown score",
+        "xhigh": "much higher than the stored hometown score",
+    }[delta_bucket]
+
+    final_text = {
+        "xlow": "one of the weakest final factors",
+        "low": "a weaker-than-average final factor",
+        "medium": "a middle-of-the-pack final factor",
+        "high": "a stronger-than-average final factor",
+        "xhigh": "one of the strongest final factors",
+    }[final_bucket]
+
+    return (
+        f"You started this at {slider_text}, rated your hometown {delta_text}, "
+        f"and it finished as {final_text}."
+    )
+
+
 def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float]) -> Dict[str, Any]:
     ground_truth_towns = load_moving_from_truth()
     candidate_df = load_moving_to_scores()
@@ -391,10 +520,26 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
         # Fallback: normalize sliders to sum to 1
         total = sum(sliders.values()) or 1.0
         w_var = {k: round(v / total, 6) for k, v in sliders.items()}
+        trace_rows = []
+        for feature in FEATURES:
+            trace_rows.append(
+                {
+                    "feature": feature,
+                    "slider": float(sliders.get(feature, 0.0)),
+                    "user_rating": None,
+                    "stored_score": None,
+                    "difference": None,
+                    "after_calibration": round(w_var.get(feature, 0.0), 4),
+                    "variance_effect": 1.0,
+                    "final_weight": round(w_var.get(feature, 0.0), 4),
+                    "explanation": "We used your slider value directly because the app could not match your hometown to the reference data.",
+                }
+            )
         return {
             "matched_town": None,
             "w_var": w_var,
             "gamma": 1.0,
+            "trace_rows": trace_rows,
         }
 
     gt = ground_truth_towns[matched]
@@ -419,12 +564,15 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
         deltas[k] = None if u is None else float(u) - float(gt_val)
 
     w_cal = {}
+    w_cal_raw = {}
     for k in FEATURES:
         delta = deltas.get(k)
         if delta is None:
             w_cal[k] = None
+            w_cal_raw[k] = None
             continue
         w = sliders[k] * (1 - ALPHA_BASE * (delta / SCALE))
+        w_cal_raw[k] = w
         if w < 0:
             w = 0.0
         w_cal[k] = w
@@ -448,12 +596,15 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
             sigma[feature] = None
 
     w_var = {}
+    w_var_raw = {}
     for feature, w in w_cal.items():
         s = sigma.get(feature)
         if w is None or s is None:
             w_var[feature] = None
+            w_var_raw[feature] = None
         else:
-            w_var[feature] = w / (s + SIGMA_EPSILON)
+            w_var_raw[feature] = w / (s + SIGMA_EPSILON)
+            w_var[feature] = w_var_raw[feature]
 
     total_var = sum(v for v in w_var.values() if v is not None)
     if total_var > 0:
@@ -487,6 +638,45 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
         gamma = TARGET_SPREAD / (mad + SIGMA_EPSILON)
         gamma = max(0.5, min(gamma, 5.0))
 
+    trace_rows = []
+    final_weight_values = [float(v) for v in w_var.values() if v is not None]
+    for feature in FEATURES:
+        user_rating_raw = intake.get(FEATURE_FIELDS[feature])
+        if feature == "Education":
+            user_rating_raw = intake.get("education_rating")
+        elif feature == "Healthcare & Fitness":
+            user_rating_raw = intake.get("healthcare_fitness_rating")
+        elif feature == "Commute/Transit Score":
+            user_rating_raw = intake.get("commute_transit_rating")
+        elif feature == "Accessibility":
+            user_rating_raw = intake.get("accessibility_rating")
+        elif feature == "Culture/Entertainment":
+            user_rating_raw = intake.get("culture_entertainment_rating")
+
+        trace_rows.append(
+            {
+                "feature": feature,
+                "slider": round(float(sliders.get(feature, 0.0)), 4),
+                "user_rating": user_rating_raw,
+                "stored_score": round(float(gt.get(feature)), 2) if gt.get(feature) is not None else None,
+                "difference": round(float(deltas.get(feature)), 2) if deltas.get(feature) is not None else None,
+                "after_calibration": round(float(w_cal.get(feature)), 4) if w_cal.get(feature) is not None else None,
+                "variance_effect": (
+                    round(float(w_var.get(feature)) / float(w_cal.get(feature)), 3)
+                    if w_var.get(feature) is not None and w_cal.get(feature) not in (None, 0)
+                    else None
+                ),
+                "final_weight": round(float(w_var.get(feature)), 4) if w_var.get(feature) is not None else None,
+                "explanation": explain_weight_change(
+                    feature,
+                    sliders.get(feature),
+                    deltas.get(feature),
+                    w_var.get(feature),
+                    final_weight_values,
+                ),
+            }
+        )
+
     return {
         "matched_town": matched,
         "w_var": w_var,
@@ -495,6 +685,7 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
         "scale": SCALE,
         "sigma_epsilon": SIGMA_EPSILON,
         "target_spread": TARGET_SPREAD,
+        "trace_rows": trace_rows,
     }
 
 def missing_fields(profile: Dict[str, Any]) -> list[str]:
@@ -631,16 +822,8 @@ def get_chat_state() -> Dict[str, Any]:
 
 
 def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None) -> str:
-    df = load_moving_to_scores()
-    shp_path = ensure_zcta_shapes()
-    zip_gdf = load_zip_shapes(str(shp_path))
-
-    # Massachusetts-only scope
-    zip_gdf = zip_gdf[zip_gdf["Zip"].astype(str).str.startswith("0")]
-
-    missing_features = [c for c in FEATURES if c not in df.columns]
-    if missing_features:
-        raise ValueError(f"Missing required feature columns in moving_to.csv: {', '.join(missing_features)}")
+    base_gdf, center = load_base_map_geometry()
+    merged = base_gdf.copy()
 
     # Compute personalized weights
     intake = intake or {}
@@ -655,11 +838,11 @@ def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None
         # Fallback to equal weights if calibration zeroed everything.
         weights = {k: 1.0 for k in columns}
 
-    df["Composite Score"] = compute_composite_score(df, columns, weights)
+    merged["Composite Score"] = compute_composite_score(merged, columns, weights)
 
     # Apply gamma to map scale
     if gamma is not None:
-        df["Composite Score (Calibrated)"] = df["Composite Score"] * float(gamma)
+        merged["Composite Score (Calibrated)"] = merged["Composite Score"] * float(gamma)
         value_col = "Composite Score (Calibrated)"
     else:
         value_col = "Composite Score"
@@ -667,14 +850,6 @@ def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None
     featured_homes = []
     if intake and intake.get("synthetic_home"):
         featured_homes = find_best_home_matches(intake.get("synthetic_home"))
-
-    df["Zip"] = df["Zip"].astype(str).str.zfill(5)
-    zip_gdf["Zip"] = zip_gdf["Zip"].astype(str).str.zfill(5)
-
-    merged = zip_gdf.merge(df, on="Zip", how="inner")
-
-    minx, miny, maxx, maxy = merged.total_bounds
-    center = ((miny + maxy) / 2, (minx + maxx) / 2)
 
     m = create_zip_heatmap(
         merged,
@@ -734,6 +909,40 @@ TEMPLATE = """
       margin-right: 6px;
       margin-bottom: 6px;
       font-size: 12px;
+    }
+    details {
+      margin-top: 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fcfcfc;
+      overflow: hidden;
+    }
+    summary {
+      cursor: pointer;
+      padding: 12px 14px;
+      font-weight: bold;
+      background: #f3f4f6;
+    }
+    .trace-wrap {
+      overflow-x: auto;
+      padding: 10px 12px 14px 12px;
+    }
+    table.trace {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    table.trace th,
+    table.trace td {
+      text-align: left;
+      vertical-align: top;
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    table.trace th {
+      background: #f9fafb;
+      position: sticky;
+      top: 0;
     }
     .slider { margin-bottom: 18px; }
     .slider label { display: block; font-weight: bold; margin-bottom: 8px; font-size: 15px; }
@@ -851,6 +1060,49 @@ TEMPLATE = """
             </p>
           {% endfor %}
         {% endif %}
+        {% if personalization.trace_rows %}
+          <details>
+            <summary>Why these weights?</summary>
+            <div class="trace-wrap">
+              <table class="trace">
+                <thead>
+                  <tr>
+                    <th>Feature</th>
+                    <th>Slider</th>
+                    <th>Your Rating</th>
+                    <th>Stored Score</th>
+                    <th>Difference</th>
+                    <th>After Calibration</th>
+                    <th>Variance Effect</th>
+                    <th>Final Weight</th>
+                    <th>What Happened</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in personalization.trace_rows %}
+                    <tr>
+                      <td>{{ row.feature }}</td>
+                      <td>{{ "%.2f"|format(row.slider) if row.slider is not none else "—" }}</td>
+                      <td>{% if row.user_rating is not none %}{{ row.user_rating }}/10{% else %}—{% endif %}</td>
+                      <td>{% if row.stored_score is not none %}{{ "%.0f"|format(row.stored_score) }}/100{% else %}—{% endif %}</td>
+                      <td>
+                        {% if row.difference is not none %}
+                          {% if row.difference > 0 %}+{% endif %}{{ "%.0f"|format(row.difference) }}
+                        {% else %}
+                          —
+                        {% endif %}
+                      </td>
+                      <td>{{ "%.2f"|format(row.after_calibration) if row.after_calibration is not none else "—" }}</td>
+                      <td>{% if row.variance_effect is not none %}{{ "%.2f"|format(row.variance_effect) }}x{% else %}—{% endif %}</td>
+                      <td>{{ "%.2f"|format(row.final_weight) if row.final_weight is not none else "—" }}</td>
+                      <td>{{ row.explanation }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        {% endif %}
       {% else %}
         <p class="help">Answer the question above to continue.</p>
       {% endif %}
@@ -901,6 +1153,17 @@ def index():
             llm_turn(state)
         except Exception as e:
             state["assistant_message"] = f"LLM error: {e}"
+
+    if state.get("is_complete"):
+        profile = state.get("profile", {})
+        weights_info = compute_weights_from_intake(profile, sliders)
+        if profile.get("synthetic_home"):
+            weights_info["synthetic_home"] = profile.get("synthetic_home")
+            try:
+                weights_info["best_home_matches"] = find_best_home_matches(profile.get("synthetic_home"))
+            except Exception as e:
+                weights_info["best_home_matches_error"] = str(e)
+        state["personalization"] = weights_info
 
     map_error = None
     session["sliders"] = sliders

@@ -10,19 +10,12 @@ import math
 def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_homes=None):
     m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
 
-    # colormap = cm.LinearColormap(
-    # colors=["blue", "cyan", "yellow", "orange", "red"],
-    # vmin=float(gdf[value_col].min()),
-    # vmax=float(gdf[value_col].max()),
-    # caption="Composite Score")
-
-    # — OPTIONAL: choropleth fill by score — colors ZIP areas
     folium.Choropleth(
         geo_data=gdf,
         data=gdf,
         columns=["Zip", value_col],
         key_on="feature.properties.Zip",
-        fill_color="YlOrRd",
+        fill_color="PuOr",
         fill_opacity=0.7,
         line_opacity=0.2,
         legend_name=value_col,

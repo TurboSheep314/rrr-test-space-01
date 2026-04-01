@@ -41,6 +41,20 @@ FEATURES = [
     "Accessibility",
     "Culture/Entertainment",
 ]
+RATING_FIELDS = [
+    ("education_rating", "Education", "How would you rate the local schools in your current town?"),
+    ("healthcare_fitness_rating", "Healthcare & Fitness", "How would you rate healthcare and fitness options in your current town?"),
+    ("commute_transit_rating", "Commute/Transit Score", "How would you rate the commute/transit in your current town?"),
+    ("accessibility_rating", "Accessibility", "How would you rate accessibility in your current town?"),
+    ("culture_entertainment_rating", "Culture/Entertainment", "How would you rate culture and entertainment in your current town?"),
+]
+RATING_OPTIONS = [
+    (1, "Very Low"),
+    (2, "Low"),
+    (3, "Medium"),
+    (4, "High"),
+    (5, "Very High"),
+]
 FEATURE_FIELDS = {
     "Education": "education",
     "Healthcare & Fitness": "healthcare_fitness",
@@ -195,6 +209,22 @@ def load_moving_from_truth() -> Dict[str, Dict[str, Any]]:
             if state_name:
                 truth[f"{town_name}, {state_name}"] = row_truth
     return truth
+
+
+@lru_cache(maxsize=1)
+def load_moving_from_town_options() -> list[str]:
+    if not MOVING_FROM_PATH.exists():
+        return []
+    df = standardize_score_df(pd.read_csv(MOVING_FROM_PATH))
+    if "Town" not in df.columns:
+        return []
+    towns = (
+        df["Town"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    return sorted([town for town in towns.unique().tolist() if town])
 
 
 @lru_cache(maxsize=1)
@@ -546,7 +576,7 @@ def compute_weights_from_intake(intake: Dict[str, Any], sliders: Dict[str, float
 
     def to_100(v: Any) -> Optional[float]:
         try:
-            return float(v) * 10.0
+            return float(v) * 20.0
         except Exception:
             return None
 
@@ -821,6 +851,25 @@ def get_chat_state() -> Dict[str, Any]:
     return session["chat_state"]
 
 
+def parse_intake_form(form, existing_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    profile = dict(existing_profile or {})
+    profile["current_town"] = form.get("current_town", "").strip()
+    profile["current_address"] = form.get("current_address", "").strip()
+
+    for field_name, _, _ in RATING_FIELDS:
+        raw = form.get(field_name, "").strip()
+        try:
+            value = int(raw)
+        except Exception:
+            value = None
+        if value is not None and 1 <= value <= 5:
+            profile[field_name] = value
+        else:
+            profile[field_name] = None
+
+    return profile
+
+
 def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None) -> str:
     base_gdf, center = load_base_map_geometry()
     merged = base_gdf.copy()
@@ -887,18 +936,52 @@ TEMPLATE = """
     .layout { display: grid; grid-template-columns: minmax(300px, var(--panel-width)) 1fr; min-height: 100vh; }
     .panel { padding: 16px; border-right: 1px solid var(--border); overflow: auto; background: var(--panel-bg); }
     .panel h2 { margin-top: 0; }
-    .chat { border: 1px solid var(--border); padding: 10px; height: 220px; overflow: auto; background: var(--chat-bg); border-radius: 12px; }
-    .chat p { margin: 6px 0; }
-    .chat .user { color: #333; }
-    .chat .assistant { color: #0b3d91; }
-    .chat-form textarea {
+    .intake-card {
+      border: 1px solid var(--border);
+      padding: 12px;
+      background: var(--chat-bg);
+      border-radius: 12px;
+      margin-bottom: 14px;
+    }
+    .field {
+      margin-bottom: 14px;
+    }
+    .field label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+    .field input[type="text"] {
       width: 100%;
-      min-height: 88px;
       padding: 12px;
       font-size: 16px;
       border: 1px solid var(--border);
       border-radius: 12px;
-      resize: vertical;
+      background: white;
+    }
+    .field select {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: white;
+    }
+    .radio-group {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .radio-option {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: white;
+      padding: 8px;
+      text-align: center;
+      font-size: 12px;
+    }
+    .radio-option input {
+      margin-bottom: 6px;
     }
     .pill {
       display: inline-block;
@@ -989,8 +1072,8 @@ TEMPLATE = """
       .panel {
         padding: 14px;
       }
-      .chat {
-        height: 180px;
+      .radio-group {
+        grid-template-columns: 1fr;
       }
       .map {
         min-height: 52vh;
@@ -1016,21 +1099,47 @@ TEMPLATE = """
 <body>
   <div class="layout">
     <div class="panel">
-      <h2>Chat Intake</h2>
-      <div class="chat">
-        {% for role, text in chat_log %}
-          <p class="{{ role }}"><strong>{{ role.title() }}:</strong> {{ text }}</p>
-        {% endfor %}
+      <h2>Home Intake</h2>
+      <div class="intake-card">
+        <p class="help">Tell us about where you live now, then we’ll personalize the map from there.</p>
+        <form method="POST" action="/intake">
+          <div class="field">
+            <label for="current_town">Current town or city</label>
+            <select id="current_town" name="current_town">
+              <option value="">Select a hometown</option>
+              {% for town in hometown_options %}
+                <option value="{{ town }}" {% if profile.current_town | default('') == town %}selected{% endif %}>{{ town }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="current_address">Current address</label>
+            <input id="current_address" type="text" name="current_address" value="{{ profile.current_address | default('') }}" placeholder="e.g. 123 Main St, Memphis, TN">
+          </div>
+          {% for field_name, feature_name, question in rating_fields %}
+            <div class="field">
+              <label>{{ question }}</label>
+              <div class="radio-group">
+                {% for option_value, option_label in rating_options %}
+                  <label class="radio-option">
+                    <input
+                      type="radio"
+                      name="{{ field_name }}"
+                      value="{{ option_value }}"
+                      {% if profile.get(field_name) == option_value %}checked{% endif %}
+                    >
+                    <div>{{ option_value }}</div>
+                    <div>{{ option_label }}</div>
+                  </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% endfor %}
+          <button type="submit">Apply Intake</button>
+        </form>
       </div>
-      {% if assistant_message %}
-        <p class="assistant"><strong>Assistant:</strong> {{ assistant_message }}</p>
-      {% endif %}
-      <form class="chat-form" method="POST" action="/chat">
-        <textarea name="chat_message" placeholder="Type your response..."></textarea>
-        <button type="submit">Send</button>
-      </form>
       {% if is_complete %}
-        <p class="help">Chat complete. Sliders now apply personalized calibration.</p>
+        <p class="help">Intake complete. Sliders now apply personalized calibration.</p>
         <div>
           {% if personalization.matched_town %}
             <span class="pill">Matched: {{ personalization.matched_town }}</span>
@@ -1083,7 +1192,7 @@ TEMPLATE = """
                     <tr>
                       <td>{{ row.feature }}</td>
                       <td>{{ "%.2f"|format(row.slider) if row.slider is not none else "—" }}</td>
-                      <td>{% if row.user_rating is not none %}{{ row.user_rating }}/10{% else %}—{% endif %}</td>
+                      <td>{% if row.user_rating is not none %}{{ row.user_rating }}/5{% else %}—{% endif %}</td>
                       <td>{% if row.stored_score is not none %}{{ "%.0f"|format(row.stored_score) }}/100{% else %}—{% endif %}</td>
                       <td>
                         {% if row.difference is not none %}
@@ -1104,7 +1213,7 @@ TEMPLATE = """
           </details>
         {% endif %}
       {% else %}
-        <p class="help">Answer the question above to continue.</p>
+        <p class="help">Fill in the town, address, and five ratings to personalize the map.</p>
       {% endif %}
 
       <hr>
@@ -1120,7 +1229,7 @@ TEMPLATE = """
         <p class="help">Scope: Massachusetts (ZIPs starting with 0)</p>
       </form>
       <form method="POST" action="/reset">
-        <button type="submit">Reset Chat</button>
+        <button type="submit">Reset Form</button>
       </form>
       {% if map_error %}
         <p class="help">Map error: {{ map_error }}</p>
@@ -1148,11 +1257,6 @@ def index():
                 sliders[f] = sliders[f]
 
     state = get_chat_state()
-    if not state["assistant_message"]:
-        try:
-            llm_turn(state)
-        except Exception as e:
-            state["assistant_message"] = f"LLM error: {e}"
 
     if state.get("is_complete"):
         profile = state.get("profile", {})
@@ -1174,9 +1278,11 @@ def index():
             TEMPLATE,
             features=FEATURES,
             feature_fields=FEATURE_FIELDS,
+            rating_fields=RATING_FIELDS,
+            rating_options=RATING_OPTIONS,
+            hometown_options=load_moving_from_town_options(),
             sliders=sliders,
-            chat_log=state.get("chat_log", []),
-            assistant_message=state.get("assistant_message", ""),
+            profile=state.get("profile", {}),
             is_complete=state.get("is_complete", False),
             personalization=state.get("personalization", {}),
             map_error=map_error,
@@ -1186,31 +1292,14 @@ def index():
         return f"<pre>Template render failed: {e}</pre>"
 
 
-@app.route("/chat", methods=["POST"])
-def chat():
+@app.route("/intake", methods=["POST"])
+def intake():
     state = get_chat_state()
-    msg = request.form.get("chat_message", "").strip()
-    if msg:
-        state.setdefault("chat_log", []).append(("user", msg))
-        state["messages"].append({"role": "user", "content": msg})
-        if not state.get("profile"):
-            state["profile"] = {}
-        # Drive the first two free-text answers into town/address slots unless the user is asking a question.
-        looks_like_question = "?" in msg or msg.lower().startswith(("what", "why", "how", "can you", "could you", "explain"))
-        if not looks_like_question and not state["profile"].get("current_town"):
-            state["profile"]["current_town"] = msg
-        elif not looks_like_question and not state["profile"].get("current_address"):
-            state["profile"]["current_address"] = msg
-
-        try:
-            llm_turn(state)
-            if state.get("assistant_message"):
-                state.setdefault("chat_log", []).append(("assistant", state["assistant_message"]))
-        except Exception as e:
-            state["assistant_message"] = f"LLM error: {e}"
+    profile = parse_intake_form(request.form, state.get("profile"))
+    state["profile"] = profile
+    state["is_complete"] = len(missing_fields(profile)) == 0
 
     if state.get("is_complete"):
-        profile = state.get("profile", {})
         try:
             synthetic_home = select_synthetic_home(
                 str(profile.get("current_address", "")),
@@ -1232,6 +1321,8 @@ def chat():
             except Exception as e:
                 weights_info["best_home_matches_error"] = str(e)
         state["personalization"] = weights_info
+    else:
+        state["personalization"] = {}
 
     session["chat_state"] = state
     return redirect(url_for("index"))

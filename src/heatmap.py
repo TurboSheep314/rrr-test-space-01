@@ -8,6 +8,16 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
     m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
     selected_zips = {str(zip_code).zfill(5) for zip_code in (selected_zips or [])}
 
+    tooltip_fields = ["Zip", value_col]
+    tooltip_aliases = ["ZIP Code", value_col]
+    for field, alias in [
+        ("market_signal", "Market Signal"),
+        ("market_interpretation", "Interpretation"),
+    ]:
+        if field in gdf.columns:
+            tooltip_fields.append(field)
+            tooltip_aliases.append(alias)
+
     folium.Choropleth(
         geo_data=gdf,
         data=gdf,
@@ -56,13 +66,30 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
         min_opacity=0.4
     ).add_to(m)
 
-    # Hover tooltips (popups) on top
+    pricing_fields = []
+    pricing_aliases = []
+    for field, alias in [
+        ("sale_count", "Sale Count"),
+        ("price_q1", "Price Q1"),
+        ("price_median", "Price Median"),
+        ("price_mean", "Price Mean"),
+        ("price_skew_direction", "Price Skew Direction"),
+        ("affordability_skew_index", "Affordability Skew Index"),
+        ("market_signal", "Market Signal"),
+        ("market_interpretation", "Interpretation"),
+        ("market_type", "Market Type"),
+    ]:
+        if field in gdf.columns:
+            pricing_fields.append(field)
+            pricing_aliases.append(alias)
+
+    # Hover tooltips on top
     folium.GeoJson(
         gdf,
         style_function=lambda feature: {"fillOpacity": 0},
         tooltip=folium.GeoJsonTooltip(
-            fields=["Zip", value_col],
-            aliases=["ZIP Code", value_col],
+            fields=tooltip_fields,
+            aliases=tooltip_aliases,
             localize=True
         ),
     ).add_to(m)
@@ -82,8 +109,8 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
             "fillOpacity": 0.08,
         },
         tooltip=folium.GeoJsonTooltip(
-            fields=["Zip", value_col],
-            aliases=["ZIP Code", value_col],
+            fields=tooltip_fields,
+            aliases=tooltip_aliases,
             localize=True
         ),
     )

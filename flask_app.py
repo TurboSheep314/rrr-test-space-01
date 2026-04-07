@@ -25,6 +25,7 @@ CONFIG_PATH = APP_DIR / "sheets.json"
 INTAKE_PATH = APP_DIR / "out" / "intake_profile.json"
 MOVING_FROM_PATH = APP_DIR / "data" / "moving_from.csv"
 MOVING_TO_PATH = APP_DIR / "data" / "moving_to.csv"
+HOME_SALES_PATH = APP_DIR / "data" / "Home Sales Data - previous year.csv"
 PREBUILT_ZCTA_GEOJSON_PATH = APP_DIR / "data" / "processed" / "ma_zcta_simplified.geojson"
 
 ALPHA_BASE = 0.3
@@ -300,6 +301,116 @@ def load_home_sales() -> pd.DataFrame:
 
     df = df.dropna(subset=["latitude", "longitude", "price"])
     return df
+
+
+@lru_cache(maxsize=1)
+def compute_zip_pricing_metrics() -> pd.DataFrame:
+    eps = 1e-6
+    df = load_home_sales().copy()
+    zip_col = "zip"
+    price_col = "price"
+
+    def compute_group(g: pd.DataFrame) -> pd.Series:
+        prices = g[price_col].dropna()
+
+        if len(prices) < 5:
+            return pd.Series(
+                {
+                    "sale_count": len(prices),
+                    "price_q1": np.nan,
+                    "price_median": np.nan,
+                    "price_mean": np.nan,
+                    "price_skew_direction": np.nan,
+                    "affordability_skew_index": np.nan,
+                }
+            )
+
+        q1 = prices.quantile(0.25)
+        median = prices.median()
+        mean = prices.mean()
+        skew_direction = mean - median
+        denom = mean - median
+        if abs(denom) < eps:
+            asi = np.nan
+        else:
+            asi = (median - q1) / denom
+
+        return pd.Series(
+            {
+                "sale_count": len(prices),
+                "price_q1": q1,
+                "price_median": median,
+                "price_mean": mean,
+                "price_skew_direction": skew_direction,
+                "affordability_skew_index": asi,
+            }
+        )
+
+    rows = []
+    for zip_value, group in df.groupby(zip_col):
+        metrics = compute_group(group)
+        row = {"zip": zip_value}
+        row.update(metrics.to_dict())
+        rows.append(row)
+    result = pd.DataFrame(rows)
+
+    valid_q1 = result["price_q1"].dropna()
+    q1_split = float(valid_q1.median()) if not valid_q1.empty else np.nan
+
+    def classify(row: pd.Series) -> pd.Series:
+        if pd.isna(row["price_skew_direction"]) or pd.isna(row["price_q1"]) or pd.isna(row["price_median"]) or pd.isna(row["price_mean"]):
+            return pd.Series(
+                {
+                    "market_type": "insufficient_data",
+                    "market_signal": "Insufficient sales data",
+                    "market_interpretation": "There are not enough recent sales here to estimate a reliable entry point into the local housing market.",
+                }
+            )
+
+        q1_is_high = row["price_q1"] >= q1_split if not pd.isna(q1_split) else False
+        median = max(abs(float(row["price_median"])), eps)
+        skew_ratio = float(row["price_mean"] - row["price_median"]) / median
+
+        if skew_ratio > 0.05:
+            if q1_is_high:
+                return pd.Series(
+                    {
+                        "market_type": "high_q1_right_skew",
+                        "market_signal": "High entry point, luxury pressure",
+                        "market_interpretation": "Even the lower end of this ZIP is expensive, and higher-end sales are pushing the average above the typical price.",
+                    }
+                )
+            return pd.Series(
+                {
+                    "market_type": "low_q1_right_skew",
+                    "market_signal": "Lower entry point, wide price spread",
+                    "market_interpretation": "This ZIP still has lower-cost entry points, but higher-end sales pull the average above the typical price, suggesting a mixed market.",
+                }
+            )
+
+        if skew_ratio < -0.05:
+            return pd.Series(
+                {
+                    "market_type": "left_skew_distressed",
+                    "market_signal": "Low-end stress in the market",
+                    "market_interpretation": "The average price falls below the typical price, which can happen when distressed lower-end sales pull the market downward.",
+                }
+            )
+
+        return pd.Series(
+            {
+                "market_type": "stable_symmetric",
+                "market_signal": "Stable entry point band",
+                "market_interpretation": "Entry-level pricing and typical pricing are relatively consistent here, suggesting a more uniform and predictable market.",
+            }
+        )
+
+    classified = result.apply(classify, axis=1)
+    result = pd.concat([result, classified], axis=1)
+    result["zip"] = normalize_zip_series(result["zip"])
+    for col in ["price_q1", "price_median", "price_mean", "price_skew_direction", "affordability_skew_index"]:
+        result[col] = result[col].round(2)
+    return result
 
 
 def score_home_match(home_row: pd.Series, synthetic_home: Dict[str, Any]) -> float:
@@ -917,6 +1028,9 @@ def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None
     merged = base_gdf.copy()
     selected_zips = session.get("selected_zips") or []
     candidate_scope = filter_gdf_to_selected_zips(base_gdf, selected_zips)
+    pricing_metrics = compute_zip_pricing_metrics().copy()
+    pricing_metrics = pricing_metrics.rename(columns={"zip": "Zip"})
+    merged = merged.merge(pricing_metrics, on="Zip", how="left")
 
     # Compute personalized weights
     intake = intake or {}

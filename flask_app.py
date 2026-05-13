@@ -284,6 +284,8 @@ def load_home_sales() -> pd.DataFrame:
         raise FileNotFoundError(f"Missing {HOME_SALES_PATH}")
 
     df = pd.read_csv(HOME_SALES_PATH)
+    if "CITY" in df.columns:
+        df["CITY"] = df["CITY"].fillna("").astype(str)
     df["zip"] = normalize_zip_series(df["ZIP OR POSTAL CODE"])
     df["city_norm"] = df["CITY"].astype(str).map(normalize_town)
     numeric_cols = {
@@ -574,8 +576,15 @@ def filter_gdf_to_selected_zips(gdf, selected_zips: Optional[list[str]]):
     return filtered if not filtered.empty else gdf
 
 
-def normalize_town(s: str) -> str:
-    return " ".join(s.strip().lower().replace(",", " ").split())
+def normalize_town(s: Any) -> str:
+    if s is None:
+        return ""
+    try:
+        if pd.isna(s):
+            return ""
+    except Exception:
+        pass
+    return " ".join(str(s).strip().lower().replace(",", " ").split())
 
 
 def match_town(current_town: str) -> Optional[str]:

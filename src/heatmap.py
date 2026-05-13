@@ -1,6 +1,7 @@
 import folium
 from folium.plugins import HeatMap
 from branca.element import Template, MacroElement
+import branca.colormap as cm
 import math
 
 
@@ -18,16 +19,61 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
             tooltip_fields.append(field)
             tooltip_aliases.append(alias)
 
-    folium.Choropleth(
-        geo_data=gdf,
-        data=gdf,
-        columns=["Zip", value_col],
-        key_on="feature.properties.Zip",
-        fill_color="PuOr",
-        fill_opacity=0.7,
-        line_opacity=0.2,
-        legend_name=value_col,
+    valid_scores = []
+    if value_col in gdf.columns:
+        for value in gdf[value_col].tolist():
+            try:
+                value = float(value)
+                if not math.isnan(value):
+                    valid_scores.append(value)
+            except Exception:
+                continue
+
+    max_abs = max((abs(v) for v in valid_scores), default=1.0)
+    if max_abs == 0:
+        max_abs = 1.0
+
+    palette = [
+        "#b35806",
+        "#e67e22",
+        "#f5c58d",
+        "#f5f2ea",
+        "#c9e3f2",
+        "#5aa2d1",
+        "#5b2a86",
+    ]
+    bounds = [(-max_abs + (2 * max_abs * i / 7.0)) for i in range(8)]
+    score_colormap = cm.StepColormap(
+        colors=palette,
+        index=bounds,
+        vmin=-max_abs,
+        vmax=max_abs,
+        caption=f"{value_col} (Centered on Home Match)",
+    )
+
+    def base_style(feature):
+        value = feature["properties"].get(value_col)
+        try:
+            value = float(value)
+            if math.isnan(value):
+                raise ValueError
+            fill = score_colormap(value)
+        except Exception:
+            fill = "#d1d5db"
+        return {
+            "fillColor": fill,
+            "fillOpacity": 0.7,
+            "color": "#6b7280",
+            "weight": 0.7,
+            "opacity": 0.45,
+        }
+
+    folium.GeoJson(
+        gdf,
+        name="zip-base-layer",
+        style_function=base_style,
     ).add_to(m)
+    score_colormap.add_to(m)
 
     # Heat layer at centroids (optional)
     # heat_data = [
@@ -140,29 +186,6 @@ def create_zip_heatmap(gdf, value_col, center=(42.3, -71.1), zoom=9, featured_ho
                 popup=folium.Popup(popup_html, max_width=280),
                 icon=folium.Icon(color="red", icon="star", prefix="fa"),
             ).add_to(m)
-
-    # LEGEND (simple HTML box)
-    template = """
-    {% macro html(this, kwargs) %}
-    <div style="
-        position: fixed;
-        bottom: 50px;
-        left: 50px;
-        z-index: 9999;
-        background-color: white;
-        padding: 8px;
-        font-size: 14px;
-        border: 1px solid #777;
-    ">
-        <strong>__VALUE_COL__</strong><br>
-        Shaded = Higher Score
-    </div>
-    {% endmacro %}
-    """
-    template = template.replace("__VALUE_COL__", value_col)
-    legend = MacroElement()
-    legend._template = Template(template)
-    m.get_root().add_child(legend)
 
     map_name = m.get_name()
     click_template = """

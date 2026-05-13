@@ -16,19 +16,19 @@ import requests
 from flask import Flask, request, render_template_string, redirect, url_for, session, Response
 
 from src.geo_utils import load_zip_shapes
-from src.composite_score import compute_composite_score
+from src.composite_score import compute_composite_score, compute_fuzzy_home_relative_score
 from src.heatmap import create_zip_heatmap
 
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "sheets.json"
 INTAKE_PATH = APP_DIR / "out" / "intake_profile.json"
-MOVING_FROM_PATH = APP_DIR / "data" / "moving_from.csv"
-MOVING_TO_PATH = APP_DIR / "data" / "moving_to.csv"
+MOVING_FROM_PATH = APP_DIR / "data" / "moving_from_test.csv"
+MOVING_TO_PATH = APP_DIR / "data" / "moving_to_test.csv"
 HOME_SALES_PATH = APP_DIR / "data" / "Home Sales Data - previous year.csv"
 PREBUILT_ZCTA_GEOJSON_PATH = APP_DIR / "data" / "processed" / "ma_zcta_simplified.geojson"
 
-ALPHA_BASE = 0.3
+ALPHA_BASE = 0.1
 SCALE = 100.0
 SIGMA_EPSILON = 1e-6
 TARGET_SPREAD = 10.0
@@ -720,7 +720,7 @@ def compute_weights_from_intake(
         return {
             "matched_town": None,
             "w_var": w_var,
-            "gamma": 1.0,
+            "gamma": 0.5,
             "trace_rows": trace_rows,
             "candidate_zip_count": int(len(candidate_df)),
         }
@@ -729,7 +729,14 @@ def compute_weights_from_intake(
 
     def to_100(v: Any) -> Optional[float]:
         try:
-            return float(v) * 20.0
+            mapping = {
+                1.0: 0.0,
+                2.0: 25.0,
+                3.0: 50.0,
+                4.0: 75.0,
+                5.0: 100.0,
+            }
+            return mapping.get(float(v))
         except Exception:
             return None
 
@@ -1049,7 +1056,12 @@ def build_map(sliders: Dict[str, float], intake: Optional[Dict[str, Any]] = None
         # Fallback to equal weights if calibration zeroed everything.
         weights = {k: 1.0 for k in columns}
 
-    merged["Composite Score"] = compute_composite_score(merged, columns, weights)
+    matched_town = weights_info.get("matched_town")
+    home_truth = load_moving_from_truth().get(matched_town) if matched_town else None
+    if home_truth:
+        merged["Composite Score"] = compute_fuzzy_home_relative_score(merged, columns, weights, sliders, home_truth)
+    else:
+        merged["Composite Score"] = compute_composite_score(merged, columns, weights)
 
     # Apply gamma to map scale
     if gamma is not None:
